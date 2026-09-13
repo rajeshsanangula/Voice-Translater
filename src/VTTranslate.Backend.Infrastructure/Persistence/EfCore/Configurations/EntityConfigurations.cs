@@ -88,10 +88,17 @@ public sealed class SubscriptionConfiguration : IEntityTypeConfiguration<Subscri
         b.Property(s => s.Status).HasConversion<string>().HasMaxLength(20);
         b.Property(s => s.BillingProviderSubscriptionId).HasMaxLength(200);
 
-        // The existing ISubscriptionRepository.FindByAccountAsync contract returns a
-        // single Subscription per account (Phase 6.3 in-memory repo keyed the same way)
-        // — enforced here rather than left as an unstated application assumption.
-        b.HasIndex(s => s.AccountId).IsUnique().HasDatabaseName("ix_subscriptions_account");
+        // Phase 6.6: Subscription is no longer 1:1 with Account (an account may have many
+        // historical rows — cancelled, expired, refunded, then re-subscribed) — but at
+        // most one LIVE (currently-effective) subscription must still exist per account.
+        // A plain unique index would make re-subscription impossible; a partial/filtered
+        // unique index enforces the real invariant at the database level instead of only
+        // in application code. See docs/phase-6.6-billing-subscription.md "Subscription
+        // Cardinality".
+        b.HasIndex(s => s.AccountId)
+            .IsUnique()
+            .HasFilter("\"Status\" IN ('Trial','Active','PastDue','GracePeriod')")
+            .HasDatabaseName("ix_subscriptions_account_live_unique");
         b.HasIndex(s => s.PlanId).HasDatabaseName("ix_subscriptions_plan");
 
         b.HasOne<Account>().WithMany().HasForeignKey(s => s.AccountId).OnDelete(DeleteBehavior.Cascade);
@@ -175,5 +182,32 @@ public sealed class AuditEventConfiguration : IEntityTypeConfiguration<AuditEven
         // an audit trail must never be silently deleted as a side effect of deleting the
         // account it references.
         b.HasOne<Account>().WithMany().HasForeignKey(a => a.AccountId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class BillingEventConfiguration : IEntityTypeConfiguration<BillingEvent>
+{
+    public void Configure(EntityTypeBuilder<BillingEvent> b)
+    {
+        b.ToTable("billing_events");
+        b.HasKey(e => e.Id);
+        b.Property(e => e.Provider).IsRequired().HasMaxLength(100);
+        b.Property(e => e.ProviderEventId).IsRequired().HasMaxLength(200);
+        b.Property(e => e.EventType).IsRequired().HasMaxLength(100);
+        b.Property(e => e.ProcessingStatus).HasConversion<string>().HasMaxLength(20);
+        b.Property(e => e.RejectionReason).HasMaxLength(500);
+        b.Property(e => e.RawPayloadHash).IsRequired().HasMaxLength(128);
+
+        // The entire idempotency mechanism (Phase 6.6) — a duplicate delivery is caught
+        // as a unique-constraint violation on insert, never as an application-level
+        // pre-check race.
+        b.HasIndex(e => new { e.Provider, e.ProviderEventId }).IsUnique().HasDatabaseName("ix_billing_events_provider_event_unique");
+        b.HasIndex(e => new { e.AccountId, e.ReceivedAt }).HasDatabaseName("ix_billing_events_account_time");
+
+        // Nullable FKs, both Restrict — an event received for an account/subscription
+        // that is later deleted must never be silently deleted itself (same discipline
+        // as audit_events).
+        b.HasOne<Account>().WithMany().HasForeignKey(e => e.AccountId).OnDelete(DeleteBehavior.Restrict);
+        b.HasOne<Subscription>().WithMany().HasForeignKey(e => e.SubscriptionId).OnDelete(DeleteBehavior.Restrict);
     }
 }

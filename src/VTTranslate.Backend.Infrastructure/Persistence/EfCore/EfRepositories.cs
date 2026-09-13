@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using VTTranslate.Backend.Domain.Abstractions;
 using VTTranslate.Backend.Domain.Entities;
 
@@ -69,15 +70,73 @@ public sealed class EfDeviceRepository(AutraxisDbContext db) : IDeviceRepository
 
 public sealed class EfSubscriptionRepository(AutraxisDbContext db) : ISubscriptionRepository
 {
+    private static readonly VTTranslate.Backend.Domain.Enums.SubscriptionStatus[] LiveStatuses =
+    [
+        VTTranslate.Backend.Domain.Enums.SubscriptionStatus.Trial,
+        VTTranslate.Backend.Domain.Enums.SubscriptionStatus.Active,
+        VTTranslate.Backend.Domain.Enums.SubscriptionStatus.PastDue,
+        VTTranslate.Backend.Domain.Enums.SubscriptionStatus.GracePeriod,
+    ];
+
+    // Phase 6.6: "the account's subscription" now means "the account's currently
+    // LIVE subscription" — the partial unique index guarantees at most one such row
+    // exists, so FirstOrDefault's "at most one match" assumption still holds.
     public Task<Subscription?> FindByAccountAsync(Guid accountId, CancellationToken ct) =>
-        db.Subscriptions.FirstOrDefaultAsync(s => s.AccountId == accountId, ct);
+        db.Subscriptions.FirstOrDefaultAsync(s => s.AccountId == accountId && LiveStatuses.Contains(s.Status), ct);
+
+    public async Task<IReadOnlyList<Subscription>> FindHistoryByAccountAsync(Guid accountId, CancellationToken ct) =>
+        await db.Subscriptions.Where(s => s.AccountId == accountId).ToListAsync(ct);
+
+    public Task<Subscription?> FindByIdAsync(Guid subscriptionId, CancellationToken ct) =>
+        db.Subscriptions.FirstOrDefaultAsync(s => s.Id == subscriptionId, ct);
+
+    public Task<Subscription?> FindByBillingProviderSubscriptionIdAsync(string billingProviderSubscriptionId, CancellationToken ct) =>
+        db.Subscriptions.FirstOrDefaultAsync(s => s.BillingProviderSubscriptionId == billingProviderSubscriptionId, ct);
 
     public async Task SaveAsync(Subscription subscription, CancellationToken ct)
     {
         var existing = await db.Subscriptions.FirstOrDefaultAsync(s => s.Id == subscription.Id, ct);
         if (existing is null) db.Subscriptions.Add(subscription);
         else db.Entry(existing).CurrentValues.SetValues(subscription);
-        await db.SaveChangesAsync(ct);
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Translate the EF Core-specific exception to a Domain-level one at this
+            // boundary (Phase 6.6) — Application must never reference an EF Core type.
+            throw new Domain.ConcurrentUpdateException(subscription.Id);
+        }
+    }
+}
+
+public sealed class EfBillingEventRepository(AutraxisDbContext db) : IBillingEventRepository
+{
+    // PostgreSQL SQLSTATE for a unique-constraint violation — used to distinguish "this
+    // (Provider, ProviderEventId) already exists" (the idempotency mechanism) from any
+    // other, unrelated database error, which must not be silently reinterpreted as a
+    // duplicate.
+    private const string UniqueViolationSqlState = "23505";
+
+    public Task<BillingEvent?> FindByProviderEventIdAsync(string provider, string providerEventId, CancellationToken ct) =>
+        db.BillingEvents.FirstOrDefaultAsync(e => e.Provider == provider && e.ProviderEventId == providerEventId, ct);
+
+    public async Task SaveAsync(BillingEvent billingEvent, CancellationToken ct)
+    {
+        var existing = await db.BillingEvents.FirstOrDefaultAsync(e => e.Id == billingEvent.Id, ct);
+        if (existing is null) db.BillingEvents.Add(billingEvent);
+        else db.Entry(existing).CurrentValues.SetValues(billingEvent);
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: UniqueViolationSqlState })
+        {
+            throw new Domain.DuplicateBillingEventException(billingEvent.Provider, billingEvent.ProviderEventId);
+        }
     }
 }
 

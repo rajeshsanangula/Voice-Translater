@@ -99,25 +99,32 @@ public class EntitlementServiceTests
     [Fact]
     public async Task ExpiredStatus_AlwaysDenies_EvenIfPeriodEndIsInTheFuture()
     {
-        // A subscription explicitly marked Expired must deny regardless of any date field —
-        // Status is authoritative, not a derived value from CurrentPeriodEnd alone.
+        // Phase 6.6: ISubscriptionRepository.FindByAccountAsync now returns only the
+        // account's CURRENTLY-EFFECTIVE (live) subscription — Expired is a terminal,
+        // historical status, so a subscription in this state is correctly no longer
+        // returned as "the account's subscription" at all. The deny outcome (the actual
+        // security property this test protects) is unchanged; only the specific denial
+        // reason changes, from a status-specific message to "no subscription found".
         var (accountId, deviceId, _) = await SeedAsync(SubscriptionStatus.Expired, _clock.UtcNow.AddDays(30), []);
 
         var decision = await _service.CanStartTranslationSessionAsync(accountId, deviceId, CancellationToken.None);
 
         Assert.False(decision.Allowed);
-        Assert.Contains("expired", decision.Reason);
+        Assert.Contains("no subscription found", decision.Reason);
     }
 
     [Fact]
     public async Task CancelledStatus_AlwaysDenies()
     {
+        // See ExpiredStatus_AlwaysDenies_EvenIfPeriodEndIsInTheFuture's comment — Phase
+        // 6.6's live-subscription-only lookup means a Cancelled row is likewise no
+        // longer surfaced as "the account's subscription"; the deny outcome is unchanged.
         var (accountId, deviceId, _) = await SeedAsync(SubscriptionStatus.Cancelled, _clock.UtcNow.AddDays(30), []);
 
         var decision = await _service.CanStartTranslationSessionAsync(accountId, deviceId, CancellationToken.None);
 
         Assert.False(decision.Allowed);
-        Assert.Contains("cancelled", decision.Reason);
+        Assert.Contains("no subscription found", decision.Reason);
     }
 
     [Fact]
@@ -228,5 +235,84 @@ public class EntitlementServiceTests
 
         // Must be denied by the TRIAL limit (60), not allowed by the much larger paid-plan limit.
         Assert.False(decision.Allowed);
+    }
+
+    // ---- Phase 6.6: PastDue (approved product decision: Option A, bounded access) ----
+
+    [Fact]
+    public async Task PastDue_WithinBound_Allows()
+    {
+        var (accountId, deviceId, _) = await SeedAsync(
+            SubscriptionStatus.PastDue, _clock.UtcNow.AddDays(-1),
+            [new Entitlement { Id = Guid.NewGuid(), PlanId = Guid.Empty, Key = EntitlementKeys.PastDueGraceDays, Value = "3" }]);
+
+        var decision = await _service.CanStartTranslationSessionAsync(accountId, deviceId, CancellationToken.None);
+
+        Assert.True(decision.Allowed);
+    }
+
+    [Fact]
+    public async Task PastDue_PastBound_Denies_NeverBecomesUnlimitedAccess()
+    {
+        var (accountId, deviceId, _) = await SeedAsync(
+            SubscriptionStatus.PastDue, _clock.UtcNow.AddDays(-10),
+            [new Entitlement { Id = Guid.NewGuid(), PlanId = Guid.Empty, Key = EntitlementKeys.PastDueGraceDays, Value = "3" }]);
+
+        var decision = await _service.CanStartTranslationSessionAsync(accountId, deviceId, CancellationToken.None);
+
+        Assert.False(decision.Allowed);
+        Assert.Contains("past-due", decision.Reason);
+    }
+
+    [Fact]
+    public async Task PastDue_MissingEntitlement_FailsClosed_NotOpen()
+    {
+        var (accountId, deviceId, _) = await SeedAsync(SubscriptionStatus.PastDue, _clock.UtcNow.AddDays(-1), []);
+
+        var decision = await _service.CanStartTranslationSessionAsync(accountId, deviceId, CancellationToken.None);
+
+        Assert.False(decision.Allowed);
+    }
+
+    [Fact]
+    public async Task Refunded_AlwaysDenies()
+    {
+        // Refunded is terminal — like Cancelled/Expired, it is no longer surfaced as
+        // "the account's subscription" by FindByAccountAsync (Phase 6.6 cardinality
+        // change), so the deny happens via "no subscription found", not a status-specific
+        // switch branch — the same, already-established pattern as the two tests above.
+        var (accountId, deviceId, _) = await SeedAsync(SubscriptionStatus.Refunded, _clock.UtcNow.AddDays(30), []);
+
+        var decision = await _service.CanStartTranslationSessionAsync(accountId, deviceId, CancellationToken.None);
+
+        Assert.False(decision.Allowed);
+    }
+
+    [Fact]
+    public async Task UnrecognizedStatus_FailsClosed_NeverImplicitlyAllows()
+    {
+        // The unconditional correctness rule (Phase 6.6): an unhandled/unrecognized
+        // SubscriptionStatus value must deny, never silently fall through to Allow. Since
+        // the enum is closed and every real member is handled, this is proven by
+        // constructing a Subscription with an out-of-range numeric status value (a
+        // malformed/corrupted-data scenario the switch's `default:` arm exists for).
+        var accountId = Guid.NewGuid();
+        var planId = Guid.NewGuid();
+        _plans.Seed(new Plan { Id = planId, Name = "Test", IsPubliclyPurchasable = false }, []);
+        await _subscriptions.SaveAsync(new Subscription
+        {
+            Id = Guid.NewGuid(),
+            AccountId = accountId,
+            PlanId = planId,
+            Status = (SubscriptionStatus)9999,
+            CurrentPeriodStart = _clock.UtcNow.AddDays(-1),
+            CurrentPeriodEnd = _clock.UtcNow.AddDays(30),
+        }, CancellationToken.None);
+        var device = await _deviceService.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "PC", CancellationToken.None);
+
+        var decision = await _service.CanStartTranslationSessionAsync(accountId, device.Id, CancellationToken.None);
+
+        Assert.False(decision.Allowed);
+        Assert.Contains("unrecognized", decision.Reason);
     }
 }

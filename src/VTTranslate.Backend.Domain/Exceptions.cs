@@ -17,6 +17,19 @@ public sealed class InsufficientRoleException(Enums.Role required, Enums.Role ac
     public Enums.Role Actual { get; } = actual;
 }
 
+/// <summary>Phase 6.6: thrown by a repository's SaveAsync when a concurrent write conflict is detected (e.g. EF Core's DbUpdateConcurrencyException, translated at the Infrastructure boundary so Application never references an EF Core type directly). ReconcileTimeBasedTransitionsAsync catches this specifically to re-read and re-evaluate rather than blindly retrying a write.</summary>
+public sealed class ConcurrentUpdateException(Guid entityId) : Exception($"Entity '{entityId}' was concurrently modified by another operation.")
+{
+    public Guid EntityId { get; } = entityId;
+}
+
+/// <summary>Phase 6.6: thrown by IBillingEventRepository.SaveAsync when a (Provider, ProviderEventId) row already exists — the entire idempotency mechanism for redelivered webhooks. Translated from the database's own unique-constraint violation at the Infrastructure boundary, exactly like <see cref="ConcurrentUpdateException"/>.</summary>
+public sealed class DuplicateBillingEventException(string provider, string providerEventId) : Exception($"BillingEvent ({provider}, {providerEventId}) already exists.")
+{
+    public string Provider { get; } = provider;
+    public string ProviderEventId { get; } = providerEventId;
+}
+
 /// <summary>Thrown when an operation is attempted against an account that is not <see cref="Entities.Account.IsUsable"/> (suspended or soft-deleted) — Phase 6.4's fail-closed account-status enforcement.</summary>
 public sealed class AccountNotUsableException(Guid accountId, Enums.AccountStatus status)
     : Exception($"Account '{accountId}' is not usable (status: {status}).")

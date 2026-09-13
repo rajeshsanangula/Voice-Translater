@@ -21,6 +21,7 @@ public sealed class AutraxisDbContext(DbContextOptions<AutraxisDbContext> option
     public DbSet<Session> Sessions => Set<Session>();
     public DbSet<UsageRecord> UsageRecords => Set<UsageRecord>();
     public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
+    public DbSet<BillingEvent> BillingEvents => Set<BillingEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

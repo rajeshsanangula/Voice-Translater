@@ -18,4 +18,7 @@ public sealed class NotImplementedBillingProvider : IBillingProvider
 
     public Task<BillingSubscriptionState?> GetSubscriptionStateAsync(string billingProviderSubscriptionId, CancellationToken ct) =>
         throw new NotImplementedException("Billing provider integration (Paddle, evaluated but not yet approved for integration) is not implemented in Phase 6.3.");
+
+    public Task<NormalizedBillingEvent?> TryVerifyAndNormalizeWebhookAsync(string rawPayload, IReadOnlyDictionary<string, string> headers, CancellationToken ct) =>
+        throw new NotImplementedException("Billing provider integration (Paddle, evaluated but not yet approved for integration) is not implemented in Phase 6.6 — no real webhook signature verification exists yet.");
 }

@@ -279,6 +279,9 @@ namespace VTTranslate.Backend.Infrastructure.Persistence.EfCore.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<bool>("CancelAtPeriodEnd")
+                        .HasColumnType("boolean");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -286,6 +289,15 @@ namespace VTTranslate.Backend.Infrastructure.Persistence.EfCore.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset>("CurrentPeriodStart")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("LastBillingEventAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("LastBillingEventPrecedence")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("LocallyCancelledAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<Guid>("PlanId")
@@ -309,12 +321,74 @@ namespace VTTranslate.Backend.Infrastructure.Persistence.EfCore.Migrations
 
                     b.HasIndex("AccountId")
                         .IsUnique()
-                        .HasDatabaseName("ix_subscriptions_account");
+                        .HasDatabaseName("ix_subscriptions_account_live_unique")
+                        .HasFilter("\"Status\" IN ('Trial','Active','PastDue','GracePeriod')");
 
                     b.HasIndex("PlanId")
                         .HasDatabaseName("ix_subscriptions_plan");
 
                     b.ToTable("subscriptions", (string)null);
+                });
+
+            modelBuilder.Entity("VTTranslate.Backend.Domain.Entities.BillingEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("ProviderEventId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("ProcessingStatus")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTimeOffset?>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RawPayloadHash")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTimeOffset>("ReceivedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RejectionReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid?>("SubscriptionId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "ReceivedAt")
+                        .HasDatabaseName("ix_billing_events_account_time");
+
+                    b.HasIndex("SubscriptionId");
+
+                    b.HasIndex("Provider", "ProviderEventId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_billing_events_provider_event_unique");
+
+                    b.ToTable("billing_events", (string)null);
                 });
 
             modelBuilder.Entity("VTTranslate.Backend.Domain.Entities.UsageRecord", b =>
@@ -442,6 +516,19 @@ namespace VTTranslate.Backend.Infrastructure.Persistence.EfCore.Migrations
                         .HasForeignKey("DeviceId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("VTTranslate.Backend.Domain.Entities.BillingEvent", b =>
+                {
+                    b.HasOne("VTTranslate.Backend.Domain.Entities.Account", null)
+                        .WithMany()
+                        .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("VTTranslate.Backend.Domain.Entities.Subscription", null)
+                        .WithMany()
+                        .HasForeignKey("SubscriptionId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 #pragma warning restore 612, 618
         }

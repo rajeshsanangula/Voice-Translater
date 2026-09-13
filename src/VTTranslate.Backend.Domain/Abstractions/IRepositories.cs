@@ -24,10 +24,39 @@ public interface IDeviceRepository
     Task SaveAsync(Device device, CancellationToken ct);
 }
 
+/// <summary>
+/// Phase 6.6: <see cref="FindByAccountAsync"/>'s meaning changed from "the account's one
+/// subscription row" (Phase 6.3-6.5, when a plain unique index on AccountId enforced
+/// exactly one row ever) to "the account's CURRENTLY-EFFECTIVE subscription" (a
+/// subscription whose Status is one of Trial/Active/PastDue/GracePeriod) — an account can
+/// now have many historical rows (see docs/phase-6.6-billing-subscription.md, "Subscription
+/// Cardinality"), but a partial unique database index still guarantees at most one LIVE
+/// row per account, so this method's "at most one result" contract is unchanged even
+/// though the underlying table is no longer 1:1.
+/// </summary>
 public interface ISubscriptionRepository
 {
     Task<Subscription?> FindByAccountAsync(Guid accountId, CancellationToken ct);
+
+    /// <summary>Phase 6.6: full historical list of every subscription row (any status) ever created for this account — for support/audit use. Never used by EntitlementService or any authorization decision.</summary>
+    Task<IReadOnlyList<Subscription>> FindHistoryByAccountAsync(Guid accountId, CancellationToken ct);
+
+    Task<Subscription?> FindByIdAsync(Guid subscriptionId, CancellationToken ct);
+
+    /// <summary>Phase 6.6: correlates an inbound billing webhook event to the AUTRAXIS subscription it concerns, by the opaque provider-issued handle. Returns null if no subscription is linked to that handle (an "unknown correlation" — never auto-creates one).</summary>
+    Task<Subscription?> FindByBillingProviderSubscriptionIdAsync(string billingProviderSubscriptionId, CancellationToken ct);
+
     Task SaveAsync(Subscription subscription, CancellationToken ct);
+}
+
+/// <summary>
+/// Phase 6.6 — the idempotency ledger port for received billing webhooks. See
+/// <see cref="Entities.BillingEvent"/>'s own doc comment.
+/// </summary>
+public interface IBillingEventRepository
+{
+    Task<BillingEvent?> FindByProviderEventIdAsync(string provider, string providerEventId, CancellationToken ct);
+    Task SaveAsync(BillingEvent billingEvent, CancellationToken ct);
 }
 
 public interface IPlanRepository
@@ -56,6 +85,21 @@ public interface IProfileRepository
 {
     Task<Profile?> FindByAccountIdAsync(Guid accountId, CancellationToken ct);
     Task SaveAsync(Profile profile, CancellationToken ct);
+}
+
+/// <summary>
+/// Phase 6.6 — a minimal transaction boundary abstraction, used ONLY by
+/// IBillingWebhookProcessor to guarantee that a BillingEvent status update and its
+/// corresponding Subscription write commit together, atomically (see
+/// docs/phase-6.6-billing-subscription.md §7 for the exact lifecycle this protects). Not
+/// a general-purpose unit-of-work — every other repository call in this codebase remains
+/// a single, self-contained SaveChangesAsync (Phase 6.5's existing, deliberate scope
+/// decision), because no other operation in this codebase spans multiple repository
+/// writes that must succeed-or-fail together.
+/// </summary>
+public interface IUnitOfWork
+{
+    Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken ct);
 }
 
 /// <summary>

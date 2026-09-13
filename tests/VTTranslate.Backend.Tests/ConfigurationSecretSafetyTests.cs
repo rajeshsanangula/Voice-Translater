@@ -47,29 +47,51 @@ public class ConfigurationSecretSafetyTests
     }
 
     /// <summary>
-    /// Billing/ProviderCredentials remain out of scope (no real config exists for them
-    /// yet) — every property in these sections must still be a documentation comment
-    /// only. Identity (Phase 6.4) and Database (Phase 6.5) are DELIBERATELY EXCLUDED from
-    /// this blanket rule: each now carries its own real (non-secret, or explicitly
-    /// secret-and-must-stay-empty) keys — see
-    /// <see cref="ConfigFile_IdentitySection_OnlyContainsNonSecretKeys"/> and
-    /// <see cref="ConfigFile_DatabaseSection_ConnectionStringNeverCommittedNonEmpty"/>
-    /// below, which enforce the narrower, correct rules for those sections instead.
+    /// ProviderCredentials remains out of scope (no real config exists for it yet) —
+    /// every property in this section must still be a documentation comment only.
+    /// Identity (Phase 6.4), Database (Phase 6.5), and Billing (Phase 6.6) are
+    /// DELIBERATELY EXCLUDED from this blanket rule: each now carries its own real
+    /// (non-secret, or explicitly secret-and-must-stay-empty) keys — see the narrower,
+    /// dedicated tests below for those sections instead.
     /// </summary>
     [Theory]
     [MemberData(nameof(ConfigFiles))]
-    public void ConfigFile_BillingProviderCredentialsSections_AreEmptyPlaceholdersOnly(string path)
+    public void ConfigFile_ProviderCredentialsSection_IsEmptyPlaceholderOnly(string path)
     {
         var content = File.ReadAllText(path);
         using var doc = System.Text.Json.JsonDocument.Parse(content);
 
-        foreach (var sectionName in new[] { "Billing", "ProviderCredentials" })
-        {
-            if (!doc.RootElement.TryGetProperty(sectionName, out var section)) continue; // not every file has every section — fine
+        if (!doc.RootElement.TryGetProperty("ProviderCredentials", out var section)) return; // not every file has this section
 
-            // Every property in these sections must be a documentation comment, never a real value.
-            foreach (var property in section.EnumerateObject())
-                Assert.StartsWith("_comment", property.Name);
+        // Every property in this section must be a documentation comment, never a real value.
+        foreach (var property in section.EnumerateObject())
+            Assert.StartsWith("_comment", property.Name);
+    }
+
+    /// <summary>
+    /// Phase 6.6: the "Billing" section now legitimately carries "Provider"/
+    /// "WebhookSigningSecret"/"Environment" keys. Provider/Environment are non-secret
+    /// placeholders (like Identity's Authority/Audience); WebhookSigningSecret IS a
+    /// secret (like Database's ConnectionString) and must always be committed empty,
+    /// never merely short. No real billing provider is activated by this config existing
+    /// — NotImplementedBillingProvider remains the only registered implementation.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ConfigFiles))]
+    public void ConfigFile_BillingSection_OnlyContainsExpectedKeysAndNoSecretValue(string path)
+    {
+        var content = File.ReadAllText(path);
+        using var doc = System.Text.Json.JsonDocument.Parse(content);
+
+        if (!doc.RootElement.TryGetProperty("Billing", out var billing)) return; // not every file has this section
+
+        var allowedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_comment", "Provider", "WebhookSigningSecret", "Environment" };
+        foreach (var property in billing.EnumerateObject())
+        {
+            Assert.Contains(property.Name, allowedKeys);
+
+            if (property.Name == "WebhookSigningSecret")
+                Assert.Equal(string.Empty, property.Value.GetString());
         }
     }
 

@@ -2,11 +2,13 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using VTTranslate.Backend.Api.Security;
 using VTTranslate.Backend.Application.Authorization;
+using VTTranslate.Backend.Application.Billing;
 using VTTranslate.Backend.Application.Devices;
 using VTTranslate.Backend.Application.Entitlements;
 using VTTranslate.Backend.Application.Identity;
 using VTTranslate.Backend.Application.Usage;
 using VTTranslate.Backend.Domain.Abstractions;
+using VTTranslate.Backend.Domain.Entities;
 using VTTranslate.Backend.Domain.Enums;
 using VTTranslate.Backend.Infrastructure.Billing;
 using VTTranslate.Backend.Infrastructure.Identity;
@@ -119,6 +121,8 @@ if (databaseConfigured)
     builder.Services.AddScoped<IUsageRecordRepository, EfUsageRecordRepository>();
     builder.Services.AddScoped<IAuditEventRepository, EfAuditEventRepository>();
     builder.Services.AddScoped<ISessionRepository, EfSessionRepository>();
+    builder.Services.AddScoped<IBillingEventRepository, EfBillingEventRepository>();
+    builder.Services.AddScoped<IUnitOfWork, EfUnitOfWork>();
 }
 else
 {
@@ -133,22 +137,45 @@ else
     builder.Services.AddSingleton<IUsageRecordRepository, InMemoryUsageRecordRepository>();
     builder.Services.AddSingleton<IAuditEventRepository, InMemoryAuditEventRepository>();
     builder.Services.AddSingleton<ISessionRepository, InMemorySessionRepository>();
+    builder.Services.AddSingleton<IBillingEventRepository, InMemoryBillingEventRepository>();
+    builder.Services.AddSingleton<IUnitOfWork, InMemoryUnitOfWork>();
 }
 
 // Phase 6.4: real identity provider (claims-mapping only — see EntraIdentityProvider's
 // own doc comment for why cryptographic verification lives in the JwtBearer middleware
 // above, not here).
 builder.Services.AddSingleton<IIdentityProvider, EntraIdentityProvider>();
-builder.Services.AddSingleton<IAccountResolutionService, AccountResolutionService>();
+
+// Phase 6.6 correctness fix: each service below depends (directly or transitively) on
+// at least one repository interface, which is registered Scoped when a real database is
+// configured (Phase 6.5's EfXxxRepository registrations, above). A Singleton service
+// cannot consume a Scoped one — the DI container throws the first time such a service is
+// actually constructed. This was latent since Phase 6.4/6.5 (no HTTP endpoint actually
+// invoked these services yet, so it never surfaced) and is fixed here, incidentally,
+// because Phase 6.6 is the first phase to wire real endpoints that do. Registering these
+// as Scoped is always safe regardless of which repository set (in-memory Singleton, or
+// EF Scoped) is active. IAuthorizationService is DELIBERATELY EXCLUDED from this fix —
+// AuthorizationService has zero constructor dependencies (pure logic over the Account
+// parameter it's called with), so it has no scoped-repository lifetime mismatch to fix
+// and remains Singleton, unchanged from Phase 6.4.
+builder.Services.AddScoped<IAccountResolutionService, AccountResolutionService>();
 
 // Billing remains a deliberate placeholder — out of scope for Phase 6.4 (see
-// docs/phase-6.4-entra-authentication.md "Deferred work").
+// docs/phase-6.4-entra-authentication.md "Deferred work"). Phase 6.6 extends the
+// interface (webhook verification) but does NOT provide a real implementation — no
+// Paddle credentials, no live billing.
 builder.Services.AddSingleton<IBillingProvider, NotImplementedBillingProvider>();
 
 builder.Services.AddSingleton<IAuthorizationService, AuthorizationService>();
-builder.Services.AddSingleton<IDeviceRegistrationService, DeviceRegistrationService>();
-builder.Services.AddSingleton<IUsageService, UsageService>();
-builder.Services.AddSingleton<IEntitlementService, EntitlementService>();
+builder.Services.AddScoped<IDeviceRegistrationService, DeviceRegistrationService>();
+builder.Services.AddScoped<IUsageService, UsageService>();
+builder.Services.AddScoped<IEntitlementService, EntitlementService>();
+
+// Phase 6.6: billing/subscription lifecycle — ISubscriptionLifecycleService is the sole
+// writer of Subscription.Status/LastBillingEventAt/LastBillingEventPrecedence/
+// LocallyCancelledAt/CancelAtPeriodEnd (see docs/phase-6.6-billing-subscription.md §9).
+builder.Services.AddScoped<ISubscriptionLifecycleService, SubscriptionLifecycleService>();
+builder.Services.AddScoped<IBillingWebhookProcessor, BillingWebhookProcessor>();
 
 var app = builder.Build();
 
@@ -213,8 +240,79 @@ app.UseAuthorization();
 NotImplementedPlaceholder(app, "/account").RequireAuthorization();
 NotImplementedPlaceholder(app, "/devices").RequireAuthorization();
 NotImplementedPlaceholder(app, "/subscription").RequireAuthorization();
-NotImplementedPlaceholder(app, "/entitlements").RequireAuthorization();
-NotImplementedPlaceholder(app, "/usage").RequireAuthorization();
+// ---- Phase 6.6: real customer subscription/entitlement/usage endpoints ----
+// All four derive the account exclusively from AccountResolutionMiddleware's resolved
+// Account (HttpContext.Items) — never from any client-supplied id/role/status value.
+// GET /subscription and GET /usage first reconcile purely time-based transitions (see
+// ISubscriptionLifecycleService.ReconcileTimeBasedTransitionsAsync) so no caller ever
+// observes a stale, time-crossed subscription status.
+
+app.MapGet("/subscription", async (HttpContext ctx, ISubscriptionRepository subscriptions, ISubscriptionLifecycleService lifecycle, IClock clock) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var subscription = await subscriptions.FindByAccountAsync(account.Id, ctx.RequestAborted);
+    if (subscription is null) return Results.NotFound(new { status = "no_subscription" });
+
+    subscription = await lifecycle.ReconcileTimeBasedTransitionsAsync(subscription, clock.UtcNow, ctx.RequestAborted);
+    return Results.Ok(new
+    {
+        status = subscription.Status.ToString(),
+        planId = subscription.PlanId,
+        currentPeriodStart = subscription.CurrentPeriodStart,
+        currentPeriodEnd = subscription.CurrentPeriodEnd,
+        cancelAtPeriodEnd = subscription.CancelAtPeriodEnd,
+    });
+}).RequireAuthorization();
+
+app.MapPost("/subscription/cancel", async (HttpContext ctx, CancelSubscriptionRequest request, ISubscriptionRepository subscriptions, ISubscriptionLifecycleService lifecycle, IClock clock) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var subscription = await subscriptions.FindByAccountAsync(account.Id, ctx.RequestAborted);
+    if (subscription is null) return Results.NotFound(new { status = "no_subscription" });
+
+    var updated = await lifecycle.ApplyCustomerCancellationAsync(subscription, request.Immediate, clock.UtcNow, ctx.RequestAborted);
+    return Results.Ok(new
+    {
+        status = updated.Status.ToString(),
+        cancelAtPeriodEnd = updated.CancelAtPeriodEnd,
+    });
+}).RequireAuthorization();
+
+app.MapGet("/entitlements", async (HttpContext ctx, ISubscriptionRepository subscriptions, IPlanRepository plans) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var subscription = await subscriptions.FindByAccountAsync(account.Id, ctx.RequestAborted);
+    if (subscription is null) return Results.NotFound(new { status = "no_subscription" });
+
+    var entitlements = await plans.GetEntitlementsAsync(subscription.PlanId, ctx.RequestAborted);
+    return Results.Ok(new
+    {
+        subscriptionStatus = subscription.Status.ToString(),
+        entitlements = entitlements.ToDictionary(e => e.Key, e => e.Value),
+    });
+}).RequireAuthorization();
+
+app.MapGet("/usage", async (HttpContext ctx, IUsageService usage, IClock clock) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var periodBucket = clock.UtcNow.ToString("yyyy-MM");
+    var summary = await usage.GetSummaryAsync(account.Id, periodBucket, ctx.RequestAborted);
+    return Results.Ok(summary);
+}).RequireAuthorization();
+
+// ---- Phase 6.6: billing webhook — anonymous at the ASP.NET layer (no customer JWT
+// exists here); authenticated instead by the provider's own signature, verified inside
+// IBillingWebhookProcessor before anything else happens. See
+// docs/phase-6.6-billing-subscription.md §7/§8 for the exact trust boundary.
+app.MapPost("/webhooks/billing", async (HttpContext ctx, IBillingWebhookProcessor processor) =>
+{
+    using var reader = new StreamReader(ctx.Request.Body);
+    var rawPayload = await reader.ReadToEndAsync(ctx.RequestAborted);
+    var headers = ctx.Request.Headers.ToDictionary(h => h.Key, h => h.Value.ToString());
+
+    var result = await processor.ProcessAsync(rawPayload, headers, ctx.RequestAborted);
+    return Results.StatusCode(result.HttpStatusCode);
+});
 
 // Phase 6.4 AUTHORIZATION-BOUNDARY PROOF ONLY — not a product feature. Exists solely so
 // the CUSTOMER-vs-ADMIN-vs-SUPER_ADMIN role gate can be exercised end-to-end over real
@@ -236,6 +334,9 @@ static RouteHandlerBuilder NotImplementedPlaceholder(WebApplication app, string 
             reason = $"'{routePrefix}' is a contract placeholder only — no production functionality exists yet.",
         },
         statusCode: StatusCodes.Status501NotImplemented));
+
+/// <summary>Phase 6.6: request body for POST /subscription/cancel. Deliberately carries no account/status/plan value — the account is always derived from AccountResolutionMiddleware, never from the request.</summary>
+public sealed record CancelSubscriptionRequest(bool Immediate);
 
 /// <summary>Exposed for VTTranslate.Backend.Tests' WebApplicationFactory-based integration tests (health, placeholder, and authentication/authorization boundary tests).</summary>
 public partial class Program;

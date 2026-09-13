@@ -32,13 +32,17 @@ public sealed class EntitlementService(
 
         var entitlements = await plans.GetEntitlementsAsync(subscription.PlanId, ct);
 
-        // 3. Subscription status must permit translation. Expired/Cancelled never do.
+        // 3. Subscription status must permit translation. Every status is handled
+        // explicitly, with an unconditional fail-closed default (Phase 6.6) — an
+        // unrecognized/unhandled status must never silently fall through to Allow.
         switch (subscription.Status)
         {
             case SubscriptionStatus.Expired:
                 return EntitlementDecision.Deny("subscription is expired");
             case SubscriptionStatus.Cancelled:
                 return EntitlementDecision.Deny("subscription is cancelled");
+            case SubscriptionStatus.Refunded:
+                return EntitlementDecision.Deny("subscription was refunded");
 
             case SubscriptionStatus.GracePeriod:
                 // Grace period must NEVER become an indefinite offline/billing bypass
@@ -50,11 +54,27 @@ public sealed class EntitlementService(
                     return EntitlementDecision.Deny("grace period has elapsed");
                 break;
 
+            case SubscriptionStatus.PastDue:
+                // Phase 6.6 approved product decision: PastDue grants BOUNDED access only
+                // (Option A) — never unlimited access while payment is failing. Mirrors
+                // GracePeriod's own pattern exactly, using a distinct, independently
+                // configurable entitlement key (see EntitlementKeys.PastDueGraceDays's own
+                // doc comment for how the two bounds compose).
+                var pastDueDays = ReadInt(entitlements, EntitlementKeys.PastDueGraceDays);
+                if (pastDueDays is null || clock.UtcNow > subscription.CurrentPeriodEnd.AddDays(pastDueDays.Value))
+                    return EntitlementDecision.Deny("past-due grace period has elapsed");
+                break;
+
             case SubscriptionStatus.Trial:
             case SubscriptionStatus.Active:
                 if (clock.UtcNow > subscription.CurrentPeriodEnd)
                     return EntitlementDecision.Deny("subscription period has ended");
                 break;
+
+            default:
+                // Unconditional correctness rule (Phase 6.6): an unrecognized status must
+                // never be treated as implicitly allowed. Fail closed.
+                return EntitlementDecision.Deny("unrecognized subscription status");
         }
 
         // 4. Usage-against-limit check — server-authoritative only (Phase 6.2B §7/§6).

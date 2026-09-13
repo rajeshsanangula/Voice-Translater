@@ -50,7 +50,6 @@ public class ApiSecurityBoundaryTests(WebApplicationFactory<Program> factory) : 
     [InlineData("/devices")]
     [InlineData("/subscription")]
     [InlineData("/entitlements")]
-    [InlineData("/entitlements/provider-token")]
     [InlineData("/usage")]
     [InlineData("/internal/diagnostics")]
     public async Task PlaceholderRoutes_RequireAuthentication_AnonymousRequestIs401_NeverAFakeSuccess(string path)
@@ -77,6 +76,21 @@ public class ApiSecurityBoundaryTests(WebApplicationFactory<Program> factory) : 
     {
         using var client = factory.CreateClient();
         var response = await client.GetAsync("/this-route-does-not-exist");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task EntitlementsProviderTokenSubRoute_Is404_PlaceholderRetiredNotSecurityRegression()
+    {
+        // Phase 6.6: /subscription, /entitlements, and /usage became real endpoints with
+        // specific routes (no catch-all sub-path placeholder remains under them) — the
+        // provider-token gateway itself is explicitly out of Phase 6.6 scope (a later,
+        // separate phase). A now-404 here is the correct, intentional consequence of
+        // retiring that specific placeholder sub-route, not an authorization regression:
+        // it was never real functionality, only ever a 501 placeholder body.
+        using var client = factory.CreateClient();
+        var response = await client.GetAsync("/entitlements/provider-token");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }

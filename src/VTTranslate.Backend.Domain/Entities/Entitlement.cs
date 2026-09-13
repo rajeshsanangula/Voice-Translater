@@ -34,4 +34,14 @@ public static class EntitlementKeys
 
     /// <summary>Bound on how long a GracePeriod subscription may continue to pass the entitlement gate before being treated as Expired — the mechanism that keeps grace periods from becoming an indefinite bypass (Phase 6.2B §12).</summary>
     public const string GracePeriodDays = "GracePeriodDays";
+
+    /// <summary>
+    /// Phase 6.6: bound on how long a PastDue subscription (payment failed, but not yet
+    /// moved to GracePeriod) may still pass the entitlement gate — anchored to the same
+    /// <see cref="Subscription.CurrentPeriodEnd"/> timestamp as <see cref="GracePeriodDays"/>.
+    /// Distinct key, distinct configurable value — PastDue access is bounded access
+    /// (approved product decision), never unlimited access while payment is failing.
+    /// See docs/phase-6.6-billing-subscription.md for how the two bounds compose.
+    /// </summary>
+    public const string PastDueGraceDays = "PastDueGraceDays";
 }

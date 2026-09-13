@@ -27,6 +27,51 @@ public interface IBillingProvider
 
     /// <summary>Looks up the current lifecycle state of a subscription at the billing provider, by the OPAQUE <c>Subscription.BillingProviderSubscriptionId</c> handle (never a provider-specific type leaking into the domain).</summary>
     Task<BillingSubscriptionState?> GetSubscriptionStateAsync(string billingProviderSubscriptionId, CancellationToken ct);
+
+    /// <summary>
+    /// Phase 6.6 — the ONLY entry point through which raw webhook bytes are ever touched.
+    /// Verifies the payload's authenticity (provider-specific signature scheme, entirely
+    /// inside the implementation — never in Application/Domain) and, only if genuine,
+    /// normalizes it to a vendor-neutral <see cref="NormalizedBillingEvent"/>. Returns
+    /// null on ANY authenticity failure — fail closed, no partial trust, no exception
+    /// carrying provider internals. Does NOT resolve an AUTRAXIS Account/Subscription
+    /// (that correlation happens afterward, in Application, against already-verified data).
+    /// </summary>
+    Task<NormalizedBillingEvent?> TryVerifyAndNormalizeWebhookAsync(string rawPayload, IReadOnlyDictionary<string, string> headers, CancellationToken ct);
+}
+
+/// <summary>
+/// Phase 6.6 — the vendor-neutral shape of an authenticated (signature-verified) billing
+/// webhook event. <see cref="EventType"/> is one of a small, closed set this system
+/// recognizes (see <c>BillingEventType</c>) — an unrecognized provider event type never
+/// reaches this record; the provider adapter maps it here or the verification call
+/// returns null/an unmapped marker, handled explicitly by the webhook processor.
+/// </summary>
+public sealed record NormalizedBillingEvent(
+    string Provider,
+    string ProviderEventId,
+    BillingEventType EventType,
+    DateTimeOffset OccurredAt,
+    string? BillingProviderSubscriptionId,
+    string? BillingProviderCustomerId,
+    string RawPayloadHash);
+
+/// <summary>
+/// Phase 6.6 — the fixed, closed set of billing event types this system's core
+/// (<c>ISubscriptionLifecycleService</c>) understands, each with its own precedence rank
+/// for the deterministic equal-timestamp ordering algorithm. Adding a new provider event
+/// type means mapping it to one of these (or adding a new member here WITH an explicit
+/// precedence assignment) — there is no default/implicit rank.
+/// </summary>
+public enum BillingEventType
+{
+    SubscriptionCreated,
+    TrialConverted,
+    PaymentSucceeded,
+    PaymentFailed,
+    CancellationRequested,
+    Refunded,
+    ChargebackReceived,
 }
 
 /// <summary>Vendor-neutral customer reference — never a Paddle-specific customer object.</summary>

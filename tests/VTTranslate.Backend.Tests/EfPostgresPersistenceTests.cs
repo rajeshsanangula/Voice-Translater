@@ -77,7 +77,7 @@ public sealed class EfPostgresPersistenceTests(PostgresFixture fixture) : IClass
         var pending = await db.Database.GetPendingMigrationsAsync();
         Assert.Empty(pending); // fixture already migrated — nothing left pending
 
-        var tableNames = new[] { "accounts", "profiles", "plans", "entitlements", "subscriptions", "devices", "sessions", "usage_records", "audit_events" };
+        var tableNames = new[] { "accounts", "profiles", "plans", "entitlements", "subscriptions", "devices", "sessions", "usage_records", "audit_events", "billing_events" };
         foreach (var table in tableNames)
         {
             // EF Core's SqlQuery<T> for a scalar T wraps the raw SQL as
@@ -467,6 +467,140 @@ public sealed class EfPostgresPersistenceTests(PostgresFixture fixture) : IClass
         await using var readDb = fixture.CreateContext();
         var accountAUsage = await readDb.UsageRecords.Where(u => u.AccountId == accountA.Id && u.PeriodBucket == period).ToListAsync();
         Assert.Empty(accountAUsage);
+    }
+
+    // ---- Phase 6.6: partial unique index (at most one LIVE subscription per account) ----
+
+    [SkipIfNoDockerFact]
+    public async Task Subscription_TwoLiveSubscriptionsForSameAccount_RejectedByPartialUniqueIndex()
+    {
+        var account = NewAccount($"acct-live-dup-{Guid.NewGuid()}");
+        var plan = new Plan { Id = Guid.NewGuid(), Name = "Live Dup Plan", IsPubliclyPurchasable = true };
+        await using var db = fixture.CreateContext();
+        db.Accounts.Add(account);
+        db.Plans.Add(plan);
+        db.Subscriptions.Add(new Subscription { Id = Guid.NewGuid(), AccountId = account.Id, PlanId = plan.Id, Status = SubscriptionStatus.Active, CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow });
+        await db.SaveChangesAsync();
+
+        // A second LIVE (Trial) subscription for the SAME account must be rejected.
+        db.Subscriptions.Add(new Subscription { Id = Guid.NewGuid(), AccountId = account.Id, PlanId = plan.Id, Status = SubscriptionStatus.Trial, CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow });
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task Subscription_LiveAndCancelled_AllowedTogether_ReSubscriptionAfterCancellation()
+    {
+        // The whole point of the Phase 6.6 cardinality change (§1 of the revised
+        // design): a cancelled (terminal, historical) row must NOT block a new live
+        // subscription for the same account.
+        var account = NewAccount($"acct-resubscribe-{Guid.NewGuid()}");
+        var plan = new Plan { Id = Guid.NewGuid(), Name = "Resubscribe Plan", IsPubliclyPurchasable = true };
+        await using var db = fixture.CreateContext();
+        db.Accounts.Add(account);
+        db.Plans.Add(plan);
+        db.Subscriptions.Add(new Subscription { Id = Guid.NewGuid(), AccountId = account.Id, PlanId = plan.Id, Status = SubscriptionStatus.Cancelled, CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow });
+        await db.SaveChangesAsync();
+
+        db.Subscriptions.Add(new Subscription { Id = Guid.NewGuid(), AccountId = account.Id, PlanId = plan.Id, Status = SubscriptionStatus.Active, CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow });
+        await db.SaveChangesAsync(); // must NOT throw
+
+        await using var readDb = fixture.CreateContext();
+        var history = await readDb.Subscriptions.Where(s => s.AccountId == account.Id).ToListAsync();
+        Assert.Equal(2, history.Count);
+        Assert.Single(history, s => s.Status == SubscriptionStatus.Active);
+        Assert.Single(history, s => s.Status == SubscriptionStatus.Cancelled);
+    }
+
+    // ---- Phase 6.6: BillingEvent idempotency/FK constraints ----
+
+    [SkipIfNoDockerFact]
+    public async Task BillingEvent_DuplicateProviderEventId_RejectedByUniqueConstraint()
+    {
+        var providerEventId = $"evt-{Guid.NewGuid()}";
+        await using var db = fixture.CreateContext();
+        db.BillingEvents.Add(new BillingEvent { Id = Guid.NewGuid(), Provider = "Paddle", ProviderEventId = providerEventId, EventType = "PaymentSucceeded", ReceivedAt = DateTimeOffset.UtcNow, ProcessingStatus = BillingEventProcessingStatus.Received, RawPayloadHash = "hash1" });
+        await db.SaveChangesAsync();
+
+        db.BillingEvents.Add(new BillingEvent { Id = Guid.NewGuid(), Provider = "Paddle", ProviderEventId = providerEventId, EventType = "PaymentSucceeded", ReceivedAt = DateTimeOffset.UtcNow, ProcessingStatus = BillingEventProcessingStatus.Received, RawPayloadHash = "hash2" });
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task BillingEvent_PersistAndQueryByAccountAndTime_CorrelatesToSubscription()
+    {
+        var account = NewAccount($"acct-billingevent-{Guid.NewGuid()}");
+        var plan = new Plan { Id = Guid.NewGuid(), Name = "Billing Event Plan", IsPubliclyPurchasable = true };
+        var subscription = new Subscription { Id = Guid.NewGuid(), AccountId = account.Id, PlanId = plan.Id, Status = SubscriptionStatus.Active, BillingProviderSubscriptionId = "sub-ef-1", CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow };
+
+        await using (var db = fixture.CreateContext())
+        {
+            db.Accounts.Add(account);
+            db.Plans.Add(plan);
+            db.Subscriptions.Add(subscription);
+            db.BillingEvents.Add(new BillingEvent { Id = Guid.NewGuid(), Provider = "Paddle", ProviderEventId = $"evt-{Guid.NewGuid()}", EventType = "PaymentFailed", AccountId = account.Id, SubscriptionId = subscription.Id, ReceivedAt = DateTimeOffset.UtcNow, ProcessingStatus = BillingEventProcessingStatus.Processed, RawPayloadHash = "hash" });
+            await db.SaveChangesAsync();
+        }
+
+        await using var readDb = fixture.CreateContext();
+        var events = await readDb.BillingEvents.Where(e => e.AccountId == account.Id).ToListAsync();
+        Assert.Single(events);
+        Assert.Equal(subscription.Id, events[0].SubscriptionId);
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task BillingEvent_ForeignKeyViolation_RejectedForUnknownSubscription()
+    {
+        await using var db = fixture.CreateContext();
+        db.BillingEvents.Add(new BillingEvent { Id = Guid.NewGuid(), Provider = "Paddle", ProviderEventId = $"evt-{Guid.NewGuid()}", EventType = "PaymentFailed", SubscriptionId = Guid.NewGuid(), ReceivedAt = DateTimeOffset.UtcNow, ProcessingStatus = BillingEventProcessingStatus.Rejected, RawPayloadHash = "hash" });
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
+    // ---- Phase 6.6: transaction-boundary rollback (real PostgreSQL, not simulated) ----
+
+    [SkipIfNoDockerFact]
+    public async Task UnitOfWork_ExceptionInsideTransaction_RollsBackBothSubscriptionAndBillingEventWrites()
+    {
+        var account = NewAccount($"acct-txn-{Guid.NewGuid()}");
+        var plan = new Plan { Id = Guid.NewGuid(), Name = "Txn Plan", IsPubliclyPurchasable = true };
+        var subscription = new Subscription { Id = Guid.NewGuid(), AccountId = account.Id, PlanId = plan.Id, Status = SubscriptionStatus.Active, BillingProviderSubscriptionId = "sub-txn-1", CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow };
+        var billingEvent = new BillingEvent { Id = Guid.NewGuid(), Provider = "Paddle", ProviderEventId = $"evt-txn-{Guid.NewGuid()}", EventType = "PaymentFailed", ReceivedAt = DateTimeOffset.UtcNow, ProcessingStatus = BillingEventProcessingStatus.Received, RawPayloadHash = "hash" };
+
+        await using (var seedDb = fixture.CreateContext())
+        {
+            seedDb.Accounts.Add(account);
+            seedDb.Plans.Add(plan);
+            seedDb.Subscriptions.Add(subscription);
+            seedDb.BillingEvents.Add(billingEvent);
+            await seedDb.SaveChangesAsync();
+        }
+
+        await using (var txnDb = fixture.CreateContext())
+        {
+            var unitOfWork = new EfUnitOfWork(txnDb);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => unitOfWork.ExecuteInTransactionAsync<object?>(async ct =>
+            {
+                // Mutate BOTH rows inside the transaction, then throw before it can commit
+                // — simulates exactly the "application attempt" transaction described in
+                // docs/phase-6.6-billing-subscription.md §7 step 3.
+                var sub = await txnDb.Subscriptions.FirstAsync(s => s.Id == subscription.Id, ct);
+                sub.Status = SubscriptionStatus.PastDue;
+
+                var evt = await txnDb.BillingEvents.FirstAsync(e => e.Id == billingEvent.Id, ct);
+                evt.ProcessingStatus = BillingEventProcessingStatus.Processed;
+
+                await txnDb.SaveChangesAsync(ct);
+                throw new InvalidOperationException("simulated transient failure after the write, before commit");
+            }, CancellationToken.None));
+        }
+
+        // A FRESH context/connection — proves the rollback is real (committed to
+        // PostgreSQL, not just an uncommitted change-tracker artifact in the same context).
+        await using var readDb = fixture.CreateContext();
+        var reloadedSubscription = await readDb.Subscriptions.FirstAsync(s => s.Id == subscription.Id);
+        var reloadedEvent = await readDb.BillingEvents.FirstAsync(e => e.Id == billingEvent.Id);
+
+        Assert.Equal(SubscriptionStatus.Active, reloadedSubscription.Status); // unchanged — rolled back
+        Assert.Equal(BillingEventProcessingStatus.Received, reloadedEvent.ProcessingStatus); // unchanged — rolled back, NOT Failed
     }
 
     [SkipIfNoDockerFact]

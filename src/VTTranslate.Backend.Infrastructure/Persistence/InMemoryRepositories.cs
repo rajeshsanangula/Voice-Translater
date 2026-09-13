@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using VTTranslate.Backend.Domain.Abstractions;
 using VTTranslate.Backend.Domain.Entities;
+using VTTranslate.Backend.Domain.Enums;
 
 namespace VTTranslate.Backend.Infrastructure.Persistence;
 
@@ -48,14 +49,45 @@ public sealed class InMemoryDeviceRepository : IDeviceRepository
 
 public sealed class InMemorySubscriptionRepository : ISubscriptionRepository
 {
-    private readonly ConcurrentDictionary<Guid, Subscription> _byAccountId = new();
+    // "Live" here is a DENYLIST of terminal statuses (the inverse of the PostgreSQL
+    // partial unique index's explicit ALLOWLIST — see SubscriptionConfiguration). This is
+    // a deliberate test-double approximation: it lets an unrecognized/future status value
+    // still be found and passed to EntitlementService's own exhaustive switch (so its
+    // `default: deny` arm is actually exercisable in unit tests), rather than being
+    // silently filtered out here first. Production behavior is governed by the real,
+    // stricter EF/Postgres allowlist, not by this in-memory approximation.
+    private static readonly SubscriptionStatus[] TerminalStatuses =
+    [
+        SubscriptionStatus.Cancelled, SubscriptionStatus.Expired, SubscriptionStatus.Refunded,
+    ];
+
+    private readonly ConcurrentDictionary<Guid, Subscription> _byId = new();
 
     public Task<Subscription?> FindByAccountAsync(Guid accountId, CancellationToken ct) =>
-        Task.FromResult(_byAccountId.GetValueOrDefault(accountId));
+        Task.FromResult(_byId.Values.FirstOrDefault(s => s.AccountId == accountId && !TerminalStatuses.Contains(s.Status)));
+
+    public Task<IReadOnlyList<Subscription>> FindHistoryByAccountAsync(Guid accountId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<Subscription>>(_byId.Values.Where(s => s.AccountId == accountId).ToList());
+
+    public Task<Subscription?> FindByIdAsync(Guid subscriptionId, CancellationToken ct) =>
+        Task.FromResult(_byId.GetValueOrDefault(subscriptionId));
+
+    public Task<Subscription?> FindByBillingProviderSubscriptionIdAsync(string billingProviderSubscriptionId, CancellationToken ct) =>
+        Task.FromResult(_byId.Values.FirstOrDefault(s => s.BillingProviderSubscriptionId == billingProviderSubscriptionId));
 
     public Task SaveAsync(Subscription subscription, CancellationToken ct)
     {
-        _byAccountId[subscription.AccountId] = subscription;
+        // Mirrors the partial unique index enforced at the database layer (Phase 6.6) —
+        // at most one LIVE subscription per account, even though many historical rows
+        // may exist. Guards the in-memory/test path the same way PostgreSQL guards
+        // production.
+        if (!TerminalStatuses.Contains(subscription.Status) &&
+            _byId.Values.Any(s => s.AccountId == subscription.AccountId && s.Id != subscription.Id && !TerminalStatuses.Contains(s.Status)))
+        {
+            throw new InvalidOperationException($"Account '{subscription.AccountId}' already has a live subscription — cannot save a second one.");
+        }
+
+        _byId[subscription.Id] = subscription;
         return Task.CompletedTask;
     }
 }
@@ -118,6 +150,33 @@ public sealed class InMemoryProfileRepository : IProfileRepository
     public Task SaveAsync(Profile profile, CancellationToken ct)
     {
         _byAccountId[profile.AccountId] = profile;
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>Dev/test-only — no real transaction; the delegate simply runs (the in-memory repositories have no partial-failure mode to protect against in a single-process test).</summary>
+public sealed class InMemoryUnitOfWork : IUnitOfWork
+{
+    public Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken ct) =>
+        operation(ct);
+}
+
+public sealed class InMemoryBillingEventRepository : IBillingEventRepository
+{
+    private readonly ConcurrentDictionary<Guid, BillingEvent> _byId = new();
+
+    public Task<BillingEvent?> FindByProviderEventIdAsync(string provider, string providerEventId, CancellationToken ct) =>
+        Task.FromResult(_byId.Values.FirstOrDefault(e => e.Provider == provider && e.ProviderEventId == providerEventId));
+
+    public Task SaveAsync(BillingEvent billingEvent, CancellationToken ct)
+    {
+        // Mirrors the UNIQUE(Provider, ProviderEventId) constraint enforced at the
+        // database layer — the entire idempotency mechanism (Phase 6.6).
+        var existing = _byId.Values.FirstOrDefault(e => e.Provider == billingEvent.Provider && e.ProviderEventId == billingEvent.ProviderEventId);
+        if (existing is not null && existing.Id != billingEvent.Id)
+            throw new Domain.DuplicateBillingEventException(billingEvent.Provider, billingEvent.ProviderEventId);
+
+        _byId[billingEvent.Id] = billingEvent;
         return Task.CompletedTask;
     }
 }
