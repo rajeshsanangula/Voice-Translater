@@ -2,12 +2,15 @@ name: Phase 6.5 — Database Persistence Verification
 
 # Narrowly scoped verification infrastructure only (see
 # docs/phase-6.5-ci-verification.md). This workflow does not build, deploy, or publish
-# anything — it exists solely to run the backend test suite (including the
-# Testcontainers-based real-PostgreSQL integration tests) on a Docker-capable
-# GitHub-hosted runner, since Phase 6.5's own dev sandbox has no Docker daemon. It adds
-# no new test logic, no new persistence code, and no substitute database — the same
-# EfPostgresPersistenceTests.cs that starts a real postgres:16-alpine container via
-# Testcontainers.PostgreSql runs completely unmodified.
+# anything. It runs two independent jobs, each on the runner platform its own suite
+# actually needs:
+#   - verify-backend-persistence (ubuntu-latest): the backend suite, including the 21
+#     Testcontainers-based real-PostgreSQL integration tests in
+#     EfPostgresPersistenceTests.cs, run completely unmodified.
+#   - verify-core-suite (windows-latest): the existing VTTranslate.Core.Tests suite,
+#     which targets net8.0-windows (WASAPI/NAudio) and needs the real Windows Desktop
+#     runtime — not present on Ubuntu, and not something this workflow attempts to fake
+#     or work around there. Both jobs must pass for the workflow to succeed.
 
 on:
   push:
@@ -37,11 +40,11 @@ jobs:
         run: docker version
 
       - name: "Build backend projects only (not VTTranslate.App/Core — see below)"
-        # This workflow verifies Phase 6.5 PostgreSQL persistence, not the Windows WPF
-        # app — so it builds only the backend test project's own dependency graph
-        # (Domain -> Application -> Infrastructure -> Api -> Tests), never
-        # VTTranslate.sln. VTTranslate.App (net8.0-windows, WPF) is never referenced by
-        # that graph and is therefore never built here, on Ubuntu or anywhere else.
+        # This job verifies Phase 6.5 PostgreSQL persistence, not the Windows WPF app or
+        # VTTranslate.Core — so it builds only the backend test project's own dependency
+        # graph (Domain -> Application -> Infrastructure -> Api -> Tests), never
+        # VTTranslate.sln. Neither VTTranslate.App nor VTTranslate.Core (both
+        # net8.0-windows) is referenced by that graph and neither is built here.
         run: dotnet build tests/VTTranslate.Backend.Tests/VTTranslate.Backend.Tests.csproj --configuration Release
 
       - name: "Run backend test suite (includes 21 real-PostgreSQL Testcontainers tests)"
@@ -55,25 +58,36 @@ jobs:
           --logger "trx;LogFileName=backend-tests.trx"
           --results-directory ./test-results
 
-      - name: "Run existing Windows/Core test suite (baseline: 399/399)"
-        # VTTranslate.Core.Tests references VTTranslate.Core, which targets
-        # net8.0-windows (WASAPI/NAudio) — unlike the backend, this dependency is real
-        # and unavoidable, so EnableWindowsTargeting=true is passed here as a CI-only
-        # MSBuild property override on the command line. No .csproj is modified; the
-        # property only relaxes the SDK's "don't cross-compile Windows-only APIs on a
-        # non-Windows OS" guard for this one CI step, it does not change what the
-        # project targets or what code runs.
-        run: >
-          dotnet test tests/VTTranslate.Core.Tests/VTTranslate.Core.Tests.csproj
-          --configuration Release
-          -p:EnableWindowsTargeting=true
-          --logger "console;verbosity=detailed"
-          --logger "trx;LogFileName=core-tests.trx"
-          --results-directory ./test-results
-
-      - name: Upload test result files
+      - name: Upload backend test result files
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase-6.5-test-results
+          name: phase-6.5-backend-test-results
+          path: ./test-results/*.trx
+
+  verify-core-suite:
+    # windows-latest carries the real Windows Desktop runtime
+    # (Microsoft.WindowsDesktop.App), which VTTranslate.Core.Tests genuinely needs
+    # (VTTranslate.Core targets net8.0-windows — WASAPI/NAudio). Running this suite on
+    # its native platform means no EnableWindowsTargeting override or any other
+    # cross-compilation workaround is needed here at all.
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: "Run existing Windows/Core test suite (baseline: 399/399)"
+        run: dotnet test tests/VTTranslate.Core.Tests/VTTranslate.Core.Tests.csproj --configuration Release --logger "console;verbosity=detailed" --logger "trx;LogFileName=core-tests.trx" --results-directory ./test-results
+
+      - name: Upload Core test result files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-6.5-core-test-results
           path: ./test-results/*.trx
