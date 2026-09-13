@@ -178,6 +178,15 @@ public sealed class EfAuditEventRepository(AutraxisDbContext db) : IAuditEventRe
     }
 }
 
+public sealed class EfProviderAccessRepository(AutraxisDbContext db) : IProviderAccessRepository
+{
+    public async Task SaveAsync(ProviderAccessGrant grant, CancellationToken ct)
+    {
+        db.ProviderAccessGrants.Add(grant);
+        await db.SaveChangesAsync(ct);
+    }
+}
+
 public sealed class EfSessionRepository(AutraxisDbContext db) : ISessionRepository
 {
     public Task<Session?> FindByIdAsync(Guid sessionId, CancellationToken ct) =>

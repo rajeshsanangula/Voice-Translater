@@ -47,25 +47,62 @@ public class ConfigurationSecretSafetyTests
     }
 
     /// <summary>
-    /// ProviderCredentials remains out of scope (no real config exists for it yet) —
-    /// every property in this section must still be a documentation comment only.
-    /// Identity (Phase 6.4), Database (Phase 6.5), and Billing (Phase 6.6) are
-    /// DELIBERATELY EXCLUDED from this blanket rule: each now carries its own real
-    /// (non-secret, or explicitly secret-and-must-stay-empty) keys — see the narrower,
-    /// dedicated tests below for those sections instead.
+    /// Phase 6.8: "ProviderCredentials" now legitimately carries nested "AzureSpeech"/
+    /// "AzureTranslator" objects, each with "SubscriptionKey" (a secret — must always be
+    /// committed empty) and "Region" (not a secret). No other provider key is permitted
+    /// here — in particular, no Gemini/OpenAI key (Gemini naturalization is never
+    /// promoted to production; see docs/phase-6.8-provider-access-gateway.md).
     /// </summary>
     [Theory]
     [MemberData(nameof(ConfigFiles))]
-    public void ConfigFile_ProviderCredentialsSection_IsEmptyPlaceholderOnly(string path)
+    public void ConfigFile_ProviderCredentialsSection_OnlyContainsExpectedKeysAndNoSecretValue(string path)
     {
         var content = File.ReadAllText(path);
         using var doc = System.Text.Json.JsonDocument.Parse(content);
 
         if (!doc.RootElement.TryGetProperty("ProviderCredentials", out var section)) return; // not every file has this section
 
-        // Every property in this section must be a documentation comment, never a real value.
+        var allowedTopLevelKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_comment", "AzureSpeech", "AzureTranslator" };
+        var allowedNestedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "SubscriptionKey", "Region" };
+
         foreach (var property in section.EnumerateObject())
-            Assert.StartsWith("_comment", property.Name);
+        {
+            Assert.Contains(property.Name, allowedTopLevelKeys);
+            if (property.Name == "_comment") continue;
+
+            foreach (var nested in property.Value.EnumerateObject())
+            {
+                Assert.Contains(nested.Name, allowedNestedKeys);
+                if (nested.Name == "SubscriptionKey")
+                    Assert.Equal(string.Empty, nested.Value.GetString());
+            }
+        }
+    }
+
+    /// <summary>
+    /// Phase 6.8: "ProviderAccess" carries only "CredentialLifetimeSeconds" — non-secret,
+    /// so no empty-value requirement, but bounded to a sane range so a committed value
+    /// can never accidentally configure an effectively-unlimited or nonsensical lifetime.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ConfigFiles))]
+    public void ConfigFile_ProviderAccessSection_LifetimeIsSaneAndBounded(string path)
+    {
+        var content = File.ReadAllText(path);
+        using var doc = System.Text.Json.JsonDocument.Parse(content);
+
+        if (!doc.RootElement.TryGetProperty("ProviderAccess", out var section)) return; // not every file has this section
+
+        var allowedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_comment", "CredentialLifetimeSeconds" };
+        foreach (var property in section.EnumerateObject())
+        {
+            Assert.Contains(property.Name, allowedKeys);
+            if (property.Name == "CredentialLifetimeSeconds")
+            {
+                var value = property.Value.GetInt32();
+                Assert.InRange(value, 1, 3600); // must be positive, never more than an hour
+            }
+        }
     }
 
     /// <summary>

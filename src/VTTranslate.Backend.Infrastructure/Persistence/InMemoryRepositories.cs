@@ -166,6 +166,20 @@ public sealed class InMemoryUnitOfWork : IUnitOfWork
         operation(ct);
 }
 
+public sealed class InMemoryProviderAccessRepository : IProviderAccessRepository
+{
+    private readonly ConcurrentBag<ProviderAccessGrant> _grants = new();
+
+    public Task SaveAsync(ProviderAccessGrant grant, CancellationToken ct)
+    {
+        _grants.Add(grant);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Test-only accessor — not part of the <see cref="IProviderAccessRepository"/> contract.</summary>
+    public IReadOnlyList<ProviderAccessGrant> Grants => _grants.ToList();
+}
+
 public sealed class InMemoryBillingEventRepository : IBillingEventRepository
 {
     private readonly ConcurrentDictionary<Guid, BillingEvent> _byId = new();

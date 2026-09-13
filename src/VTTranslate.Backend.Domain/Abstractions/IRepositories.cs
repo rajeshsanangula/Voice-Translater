@@ -1,4 +1,5 @@
 using VTTranslate.Backend.Domain.Entities;
+using VTTranslate.Backend.Domain.Enums;
 
 namespace VTTranslate.Backend.Domain.Abstractions;
 
@@ -113,6 +114,41 @@ public interface IUnitOfWork
 {
     Task<T> ExecuteInTransactionAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken ct);
 }
+
+/// <summary>
+/// Phase 6.8 — append-only persistence for issued provider-access grants (audit/history
+/// only; never used for any authorization decision — the authoritative decision is made
+/// fresh on every request by <see cref="Entities.ProviderAccessGrant"/>'s own callers,
+/// re-running the full authorization chain, never by reading a past grant).
+/// </summary>
+public interface IProviderAccessRepository
+{
+    Task SaveAsync(ProviderAccessGrant grant, CancellationToken ct);
+}
+
+/// <summary>
+/// Phase 6.8 — the Infrastructure-implemented boundary that actually mints a short-lived,
+/// provider-specific delegated credential. One implementation per <see cref="Provider"/>;
+/// the Application layer depends only on this interface, never on any provider SDK or
+/// HTTP detail. Master/long-lived provider credentials are read and used ENTIRELY inside
+/// implementations of this interface (Infrastructure) — never exposed to Application,
+/// Domain, or any API response.
+/// </summary>
+public interface IProviderCredentialIssuer
+{
+    Provider Provider { get; }
+    bool SupportsCapability(ProviderCapability capability);
+
+    /// <summary>
+    /// Mints a short-lived delegated credential for the given capability. Returns null
+    /// (fail closed) if the provider call fails or the master credential is not
+    /// configured — never fabricates a credential, never falls back to a long-lived one.
+    /// </summary>
+    Task<IssuedProviderCredential?> IssueAsync(ProviderCapability capability, TimeSpan lifetime, CancellationToken ct);
+}
+
+/// <summary>The ONLY shape a provider-access caller ever sees — a genuinely short-lived, provider-scoped credential, never the backend's own master key.</summary>
+public sealed record IssuedProviderCredential(string AccessToken, string Region, DateTimeOffset ExpiresAt);
 
 /// <summary>
 /// Phase 6.5 addition — authentication-session persistence (sign-out-this-device /

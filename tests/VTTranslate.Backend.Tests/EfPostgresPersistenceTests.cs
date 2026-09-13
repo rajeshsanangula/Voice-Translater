@@ -79,7 +79,7 @@ public sealed class EfPostgresPersistenceTests(PostgresFixture fixture) : IClass
         var pending = await db.Database.GetPendingMigrationsAsync();
         Assert.Empty(pending); // fixture already migrated — nothing left pending
 
-        var tableNames = new[] { "accounts", "profiles", "plans", "entitlements", "subscriptions", "devices", "sessions", "usage_records", "audit_events", "billing_events" };
+        var tableNames = new[] { "accounts", "profiles", "plans", "entitlements", "subscriptions", "devices", "sessions", "usage_records", "audit_events", "billing_events", "provider_access_grants" };
         foreach (var table in tableNames)
         {
             // EF Core's SqlQuery<T> for a scalar T wraps the raw SQL as
@@ -603,6 +603,110 @@ public sealed class EfPostgresPersistenceTests(PostgresFixture fixture) : IClass
 
         Assert.Equal(SubscriptionStatus.Active, reloadedSubscription.Status); // unchanged — rolled back
         Assert.Equal(BillingEventProcessingStatus.Received, reloadedEvent.ProcessingStatus); // unchanged — rolled back, NOT Failed
+    }
+
+    // ---- Phase 6.8: provider-access grant persistence/transaction rollback ----
+
+    [SkipIfNoDockerFact]
+    public async Task ProviderAccessGrant_PersistAndQueryByAccount()
+    {
+        var account = NewAccount($"acct-grant-{Guid.NewGuid()}");
+        var plan = new Plan { Id = Guid.NewGuid(), Name = "Grant Plan", IsPubliclyPurchasable = true };
+        var device = new Device { Id = Guid.NewGuid(), AccountId = account.Id, Platform = DevicePlatform.Windows, Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow };
+
+        await using (var db = fixture.CreateContext())
+        {
+            db.Accounts.Add(account);
+            db.Plans.Add(plan);
+            db.Devices.Add(device);
+            db.ProviderAccessGrants.Add(new ProviderAccessGrant
+            {
+                Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = device.Id,
+                Provider = Provider.AzureSpeech, Capability = ProviderCapability.SpeechRecognition,
+                IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10), CorrelationId = Guid.NewGuid(),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await using var readDb = fixture.CreateContext();
+        var grants = await readDb.ProviderAccessGrants.Where(g => g.AccountId == account.Id).ToListAsync();
+        Assert.Single(grants);
+        Assert.Equal(device.Id, grants[0].DeviceId);
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task ProviderAccessGrant_AccountIsolation_QueryByAccountNeverReturnsAnotherAccountsGrant()
+    {
+        var accountA = NewAccount($"acct-grant-iso-a-{Guid.NewGuid()}");
+        var accountB = NewAccount($"acct-grant-iso-b-{Guid.NewGuid()}");
+        var deviceA = new Device { Id = Guid.NewGuid(), AccountId = accountA.Id, Platform = DevicePlatform.Windows, Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow };
+        var deviceB = new Device { Id = Guid.NewGuid(), AccountId = accountB.Id, Platform = DevicePlatform.Windows, Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow };
+
+        await using (var db = fixture.CreateContext())
+        {
+            db.Accounts.AddRange(accountA, accountB);
+            db.Devices.AddRange(deviceA, deviceB);
+            db.ProviderAccessGrants.Add(new ProviderAccessGrant { Id = Guid.NewGuid(), AccountId = accountA.Id, DeviceId = deviceA.Id, Provider = Provider.AzureSpeech, Capability = ProviderCapability.SpeechRecognition, IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10), CorrelationId = Guid.NewGuid() });
+            db.ProviderAccessGrants.Add(new ProviderAccessGrant { Id = Guid.NewGuid(), AccountId = accountB.Id, DeviceId = deviceB.Id, Provider = Provider.AzureSpeech, Capability = ProviderCapability.SpeechRecognition, IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10), CorrelationId = Guid.NewGuid() });
+            await db.SaveChangesAsync();
+        }
+
+        await using var readDb = fixture.CreateContext();
+        var accountAGrants = await readDb.ProviderAccessGrants.Where(g => g.AccountId == accountA.Id).ToListAsync();
+        Assert.Single(accountAGrants);
+        Assert.Equal(deviceA.Id, accountAGrants[0].DeviceId);
+        Assert.DoesNotContain(accountAGrants, g => g.AccountId == accountB.Id);
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task ProviderAccessGrant_ForeignKeyViolation_RejectedForUnknownDevice()
+    {
+        var account = NewAccount($"acct-grant-fk-{Guid.NewGuid()}");
+        await using var db = fixture.CreateContext();
+        db.Accounts.Add(account);
+        db.ProviderAccessGrants.Add(new ProviderAccessGrant
+        {
+            Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = Guid.NewGuid(),
+            Provider = Provider.AzureSpeech, Capability = ProviderCapability.SpeechRecognition,
+            IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10), CorrelationId = Guid.NewGuid(),
+        });
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task ProviderAccessIssuance_ExceptionInsideTransaction_RollsBackBothGrantAndAuditWrites()
+    {
+        var account = NewAccount($"acct-grant-txn-{Guid.NewGuid()}");
+        var device = new Device { Id = Guid.NewGuid(), AccountId = account.Id, Platform = DevicePlatform.Windows, Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow };
+
+        await using (var seedDb = fixture.CreateContext())
+        {
+            seedDb.Accounts.Add(account);
+            seedDb.Devices.Add(device);
+            await seedDb.SaveChangesAsync();
+        }
+
+        var grantId = Guid.NewGuid();
+        await using (var txnDb = fixture.CreateContext())
+        {
+            var unitOfWork = new EfUnitOfWork(txnDb);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => unitOfWork.ExecuteInTransactionAsync<object?>(async ct =>
+            {
+                txnDb.ProviderAccessGrants.Add(new ProviderAccessGrant
+                {
+                    Id = grantId, AccountId = account.Id, DeviceId = device.Id,
+                    Provider = Provider.AzureSpeech, Capability = ProviderCapability.SpeechRecognition,
+                    IssuedAt = DateTimeOffset.UtcNow, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10), CorrelationId = Guid.NewGuid(),
+                });
+                await txnDb.SaveChangesAsync(ct);
+
+                throw new InvalidOperationException("simulated failure after the grant write, before commit (e.g. the audit write failing)");
+            }, CancellationToken.None));
+        }
+
+        await using var readDb = fixture.CreateContext();
+        var reloaded = await readDb.ProviderAccessGrants.FirstOrDefaultAsync(g => g.Id == grantId);
+        Assert.Null(reloaded); // rolled back — never partially persisted
     }
 
     // ---- Phase 6.7: real PostgreSQL device-registration concurrency ----

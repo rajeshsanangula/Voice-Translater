@@ -211,3 +211,26 @@ public sealed class BillingEventConfiguration : IEntityTypeConfiguration<Billing
         b.HasOne<Subscription>().WithMany().HasForeignKey(e => e.SubscriptionId).OnDelete(DeleteBehavior.Restrict);
     }
 }
+
+public sealed class ProviderAccessGrantConfiguration : IEntityTypeConfiguration<ProviderAccessGrant>
+{
+    public void Configure(EntityTypeBuilder<ProviderAccessGrant> b)
+    {
+        b.ToTable("provider_access_grants");
+        b.HasKey(g => g.Id);
+        b.Property(g => g.Provider).HasConversion<string>().HasMaxLength(30);
+        b.Property(g => g.Capability).HasConversion<string>().HasMaxLength(30);
+
+        // Primary access patterns: "this account's grant history" and "this device's
+        // grant history" (support/audit use) — matches the expected access pattern
+        // convention already established for audit_events/billing_events.
+        b.HasIndex(g => new { g.AccountId, g.IssuedAt }).HasDatabaseName("ix_provider_access_grants_account_time");
+        b.HasIndex(g => g.DeviceId).HasDatabaseName("ix_provider_access_grants_device");
+
+        // Cascade with Account/Device — a grant record has no standalone meaning once
+        // either owning row is gone; unlike audit_events/billing_events, this is not a
+        // compliance-grade audit trail requiring Restrict, just an operational history.
+        b.HasOne<Account>().WithMany().HasForeignKey(g => g.AccountId).OnDelete(DeleteBehavior.Cascade);
+        b.HasOne<Device>().WithMany().HasForeignKey(g => g.DeviceId).OnDelete(DeleteBehavior.Cascade);
+    }
+}

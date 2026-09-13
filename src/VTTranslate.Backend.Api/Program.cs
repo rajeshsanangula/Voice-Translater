@@ -6,6 +6,7 @@ using VTTranslate.Backend.Application.Billing;
 using VTTranslate.Backend.Application.Devices;
 using VTTranslate.Backend.Application.Entitlements;
 using VTTranslate.Backend.Application.Identity;
+using VTTranslate.Backend.Application.ProviderAccess;
 using VTTranslate.Backend.Application.Usage;
 using VTTranslate.Backend.Domain;
 using VTTranslate.Backend.Domain.Abstractions;
@@ -15,6 +16,7 @@ using VTTranslate.Backend.Infrastructure.Billing;
 using VTTranslate.Backend.Infrastructure.Identity;
 using VTTranslate.Backend.Infrastructure.Persistence;
 using VTTranslate.Backend.Infrastructure.Persistence.EfCore;
+using VTTranslate.Backend.Infrastructure.ProviderAccess;
 using VTTranslate.Backend.Infrastructure.Time;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -177,6 +179,66 @@ builder.Services.AddScoped<IEntitlementService, EntitlementService>();
 // LocallyCancelledAt/CancelAtPeriodEnd (see docs/phase-6.6-billing-subscription.md §9).
 builder.Services.AddScoped<ISubscriptionLifecycleService, SubscriptionLifecycleService>();
 builder.Services.AddScoped<IBillingWebhookProcessor, BillingWebhookProcessor>();
+
+// ---- Phase 6.8: provider-access gateway ----
+// ProviderCredentials:{AzureSpeech,AzureTranslator}:{SubscriptionKey,Region} are SECRETS
+// (the long-lived master keys) — always empty in committed config (see appsettings.json's
+// own comment). Each provider's IProviderCredentialIssuer is registered ONLY when its own
+// SubscriptionKey/Region are both configured — an unconfigured provider is simply never
+// registered, so ProviderAccessGateway's issuer lookup naturally reports
+// "unsupported provider" for it (never a fake/fabricated credential, never a fallback to
+// a long-lived key). ProviderAccess:CredentialLifetimeSeconds is non-secret, defaults
+// conservatively if unset — see ProviderAccessOptions's own doc comment.
+builder.Services.AddHttpClient();
+
+var azureSpeechOptions = builder.Configuration.GetSection("ProviderCredentials:AzureSpeech").Get<AzureProviderOptions>() ?? new AzureProviderOptions();
+var azureTranslatorOptions = builder.Configuration.GetSection("ProviderCredentials:AzureTranslator").Get<AzureProviderOptions>() ?? new AzureProviderOptions();
+var providerAccessOptions = builder.Configuration.GetSection(ProviderAccessOptions.SectionName).Get<ProviderAccessOptions>() ?? new ProviderAccessOptions();
+var credentialLifetime = TimeSpan.FromSeconds(providerAccessOptions.CredentialLifetimeSeconds > 0 ? providerAccessOptions.CredentialLifetimeSeconds : 600);
+
+if (databaseConfigured)
+{
+    builder.Services.AddScoped<IProviderAccessRepository, EfProviderAccessRepository>();
+}
+else
+{
+    builder.Services.AddSingleton<IProviderAccessRepository, InMemoryProviderAccessRepository>();
+}
+
+builder.Services.AddSingleton<IEnumerable<IProviderCredentialIssuer>>(sp =>
+{
+    var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+    var issuers = new List<IProviderCredentialIssuer>();
+
+    if (!string.IsNullOrWhiteSpace(azureSpeechOptions.SubscriptionKey) && !string.IsNullOrWhiteSpace(azureSpeechOptions.Region))
+    {
+        issuers.Add(new AzureProviderCredentialIssuer(
+            httpClientFactory.CreateClient(), Provider.AzureSpeech, azureSpeechOptions.SubscriptionKey, azureSpeechOptions.Region,
+            new HashSet<ProviderCapability> { ProviderCapability.SpeechRecognition, ProviderCapability.SpeechSynthesis }));
+    }
+    if (!string.IsNullOrWhiteSpace(azureTranslatorOptions.SubscriptionKey) && !string.IsNullOrWhiteSpace(azureTranslatorOptions.Region))
+    {
+        issuers.Add(new AzureProviderCredentialIssuer(
+            httpClientFactory.CreateClient(), Provider.AzureTranslator, azureTranslatorOptions.SubscriptionKey, azureTranslatorOptions.Region,
+            new HashSet<ProviderCapability> { ProviderCapability.TextTranslation }));
+    }
+
+    if (issuers.Count == 0)
+    {
+        Console.WriteLine("[startup] No ProviderCredentials configured — /provider-access will report every request as unsupported-provider (fail closed, never a fabricated credential).");
+    }
+    return issuers;
+});
+
+builder.Services.AddScoped<IProviderAccessGateway>(sp => new ProviderAccessGateway(
+    sp.GetRequiredService<IDeviceRegistrationService>(),
+    sp.GetRequiredService<IEntitlementService>(),
+    sp.GetRequiredService<IEnumerable<IProviderCredentialIssuer>>(),
+    sp.GetRequiredService<IProviderAccessRepository>(),
+    sp.GetRequiredService<IAuditEventRepository>(),
+    sp.GetRequiredService<IUnitOfWork>(),
+    sp.GetRequiredService<IClock>(),
+    credentialLifetime));
 
 var app = builder.Build();
 
@@ -381,6 +443,44 @@ app.MapPost("/webhooks/billing", async (HttpContext ctx, IBillingWebhookProcesso
     return Results.StatusCode(result.HttpStatusCode);
 });
 
+// ---- Phase 6.8: provider-access gateway endpoint ----
+// deviceId/provider/capability come from the request body (validated, parsed to closed
+// enums); the ACCOUNT never does — derived exclusively from AccountResolutionMiddleware,
+// exactly like every other customer endpoint. Every failure path returns a generic,
+// safe reason string — never provider/internal details, never the requested credential.
+app.MapPost("/provider-access", async (HttpContext ctx, ProviderAccessRequest request, IProviderAccessGateway gateway) =>
+{
+    if (!Enum.TryParse<Provider>(request.Provider, ignoreCase: true, out var provider))
+        return Results.BadRequest(new { status = "unsupported_provider" });
+    if (!Enum.TryParse<ProviderCapability>(request.Capability, ignoreCase: true, out var capability))
+        return Results.BadRequest(new { status = "unsupported_capability" });
+    if (!Guid.TryParse(request.DeviceId, out var deviceId))
+        return Results.BadRequest(new { status = "invalid_device_id" });
+
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var result = await gateway.RequestAccessAsync(account.Id, deviceId, provider, capability, ctx.RequestAborted);
+
+    return result.Outcome switch
+    {
+        ProviderAccessOutcome.Granted => Results.Ok(new
+        {
+            provider = provider.ToString(),
+            capability = capability.ToString(),
+            accessToken = result.Credential!.AccessToken,
+            region = result.Credential.Region,
+            expiresAt = result.Credential.ExpiresAt,
+            correlationId = result.CorrelationId,
+        }),
+        ProviderAccessOutcome.DeviceNotAuthorized => Results.Json(new { status = "device_not_authorized" }, statusCode: StatusCodes.Status403Forbidden),
+        ProviderAccessOutcome.EntitlementDenied => Results.Json(new { status = "entitlement_denied" }, statusCode: StatusCodes.Status403Forbidden),
+        ProviderAccessOutcome.UsageDenied => Results.Json(new { status = "usage_denied" }, statusCode: StatusCodes.Status403Forbidden),
+        ProviderAccessOutcome.UnsupportedProvider => Results.BadRequest(new { status = "unsupported_provider" }),
+        ProviderAccessOutcome.UnsupportedCapability => Results.BadRequest(new { status = "unsupported_capability" }),
+        ProviderAccessOutcome.ProviderUnavailable => Results.Json(new { status = "provider_unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable),
+        _ => Results.Json(new { status = "denied" }, statusCode: StatusCodes.Status403Forbidden),
+    };
+}).RequireAuthorization();
+
 // Phase 6.4 AUTHORIZATION-BOUNDARY PROOF ONLY — not a product feature. Exists solely so
 // the CUSTOMER-vs-ADMIN-vs-SUPER_ADMIN role gate can be exercised end-to-end over real
 // HTTP in an integration test (see VTTranslate.Backend.Tests). Still returns the same
@@ -407,6 +507,9 @@ public sealed record CancelSubscriptionRequest(bool Immediate);
 
 /// <summary>Phase 6.7: request body for POST /devices. Deliberately carries no account ID or device ID — the account comes from AccountResolutionMiddleware, and the device ID is always server-generated (Guid.NewGuid()), never client-supplied.</summary>
 public sealed record RegisterDeviceRequest(string Platform, string? DisplayName);
+
+/// <summary>Phase 6.8: request body for POST /provider-access. Deliberately carries no account ID and no role/entitlement/usage value — the account is always derived from AccountResolutionMiddleware; only the target device (which must belong to that account) and the requested provider/capability are client-supplied.</summary>
+public sealed record ProviderAccessRequest(string DeviceId, string Provider, string Capability);
 
 /// <summary>Exposed for VTTranslate.Backend.Tests' WebApplicationFactory-based integration tests (health, placeholder, and authentication/authorization boundary tests).</summary>
 public partial class Program;
