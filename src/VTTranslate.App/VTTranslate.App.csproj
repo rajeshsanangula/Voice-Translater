@@ -17,6 +17,16 @@
   </ItemGroup>
 
   <!--
+    Phase 7.1 — customer authentication (Microsoft Entra External ID via MSAL.NET,
+    Authorization Code + PKCE, system browser, loopback redirect) and the DPAPI-backed
+    secure token cache. See docs/phase-7.1-customer-authentication-client-and-entra-integration.md.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Identity.Client" Version="4.61.3" />
+    <PackageReference Include="Microsoft.Identity.Client.Extensions.Msal" Version="4.61.3" />
+  </ItemGroup>
+
+  <!--
     AUTRAXIS SYSTEMS INC. brand assets — copied to the output directory as loose files
     (not embedded WPF Resources) so BrandAssets.cs can gracefully detect their absence at
     runtime instead of failing the build when the real PNGs haven't been dropped in yet.

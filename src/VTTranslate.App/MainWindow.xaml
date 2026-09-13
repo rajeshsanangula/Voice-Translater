@@ -84,6 +84,7 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
@@ -97,7 +98,18 @@
                                Foreground="{StaticResource BrandNavySoftBrush}" />
                 </StackPanel>
 
+                <!-- Phase 7.1: customer authentication status — never displays a token, key, or
+                     internal backend authorization detail; only a generic sign-in state. -->
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,14,0">
+                    <TextBlock Text="{Binding AccountStatusMessage}" VerticalAlignment="Center" Margin="0,0,10,0"
+                               Foreground="{StaticResource BrandNavySoftBrush}" FontSize="12" />
+                    <Button Content="Sign In" Style="{StaticResource SecondaryButton}" Padding="12,6"
+                            Command="{Binding SignInCommand}" Visibility="{Binding IsSignedOut, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" />
+                    <Button Content="Sign Out" Style="{StaticResource SecondaryButton}" Padding="12,6"
+                            Command="{Binding SignOutCommand}" Visibility="{Binding IsSignedIn, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,14,0">
                     <Border Style="{StaticResource StatusPillBorder}">
                         <StackPanel Orientation="Horizontal">
                             <Ellipse Style="{StaticResource StatusPillDot}" VerticalAlignment="Center" />
@@ -106,7 +118,7 @@
                     </Border>
                 </StackPanel>
 
-                <Button Grid.Column="3" Content="About" Style="{StaticResource SecondaryButton}"
+                <Button Grid.Column="4" Content="About" Style="{StaticResource SecondaryButton}"
                         Padding="12,6" Click="About_Click" />
             </Grid>
         </Border>
@@ -179,13 +191,14 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Azure provider status -->
+                    <!-- Phase 7.1: customer-facing account status only — no provider keys, no
+                         internal backend authorization details are ever shown here. -->
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
-                            <TextBlock Text="Azure Speech Provider" Style="{StaticResource SectionHeaderText}" />
-                            <TextBlock Text="{Binding AzureConfigStatus}" TextWrapping="Wrap" Foreground="{StaticResource BrandNavySoftBrush}" FontSize="12" />
+                            <TextBlock Text="Account" Style="{StaticResource SectionHeaderText}" />
+                            <TextBlock Text="{Binding AccountStatusMessage}" TextWrapping="Wrap" Foreground="{StaticResource BrandNavySoftBrush}" FontSize="12" />
                             <TextBlock Style="{StaticResource HintText}" Margin="0,8,0,0"
-                                       Text="Set via the AZURE_SPEECH_KEY and AZURE_SPEECH_REGION environment variables (never entered or stored in this app), then restart." />
+                                       Text="Translation service access is authorized through your AUTRAXIS account — sign in above to start a session." />
                         </StackPanel>
                     </Border>
 

@@ -1,8 +1,11 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Input;
+using VTTranslate.App.Api;
+using VTTranslate.App.Authentication;
 using VTTranslate.Core.Audio;
 using VTTranslate.Core.Config;
 using VTTranslate.Core.Diagnostics;
@@ -37,6 +40,20 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     private DirectionPipeline? _remoteToEnglish;
     private CancellationTokenSource? _cts;
     private readonly IDiagnosticLogger _diagnosticLogger = new FileDiagnosticLogger();
+
+    // ---- Phase 7.1: customer authentication / authenticated backend integration ----
+    // See docs/phase-7.1-customer-authentication-client-and-entra-integration.md.
+    // Null when AuthenticationOptions.FromEnvironment() is not configured — the
+    // customer application then fails closed to a clear configuration message rather
+    // than silently falling back to any unauthenticated/direct-provider-key path.
+    private readonly AuthenticationOptions _authOptions;
+    private IAuthenticationService? _authService;
+    private ITokenProvider? _tokenProvider;
+    private IAutraxisApiClient? _apiClient;
+    private readonly HttpClient _httpClient = new();
+    private Guid? _deviceId;
+    private Guid? _activeSessionId;
+    private CancellationTokenSource? _heartbeatCts;
 
     private string _status = "Idle";
     public string Status { get => _status; set { _status = value; Raise(); Raise(nameof(StatusKind)); } }
@@ -87,12 +104,32 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     private string _configWarnings = "";
     public string ConfigWarnings { get => _configWarnings; set { _configWarnings = value; Raise(); } }
 
-    public string AzureConfigStatus =>
-        Settings.IsProviderConfigured
-            ? $"Loaded from environment: region '{Settings.AzureSpeechRegion}', key ****{Tail(Settings.AzureSpeechKey)}"
-            : "NOT CONFIGURED — set AZURE_SPEECH_KEY and AZURE_SPEECH_REGION environment variables, then restart the app.";
+    // ---- Phase 7.1: authentication state surfaced to the UI ----
+    // Never displays a token, key, claim, or internal backend authorization detail —
+    // only a generic sign-in/account-status message (docs §16/§28: anti-enumeration,
+    // and never logging/displaying token content).
+    private AuthenticationState _authState = AuthenticationState.SignedOut;
+    public AuthenticationState AuthState
+    {
+        get => _authState;
+        private set { _authState = value; Raise(); Raise(nameof(IsSignedIn)); Raise(nameof(IsSignedOut)); Raise(nameof(AccountStatusMessage)); RaiseCommands(); }
+    }
+    public bool IsSignedIn => AuthState == AuthenticationState.SignedIn;
+    public bool IsSignedOut => !IsSignedIn;
 
-    private static string Tail(string? s) => string.IsNullOrEmpty(s) ? "" : s[^Math.Min(4, s.Length)..];
+    private string _accountStatusMessage = "";
+    /// <summary>Generic, safe message only — never a specific account-status value (Pending/Suspended/Disabled/Closed are deliberately indistinguishable at the API boundary, docs §16/§19).</summary>
+    public string AccountStatusMessage
+    {
+        get => _accountStatusMessage.Length > 0 ? _accountStatusMessage : AuthState switch
+        {
+            AuthenticationState.SignedIn => "Signed in",
+            AuthenticationState.Authenticating => "Signing in…",
+            AuthenticationState.AuthenticationFailed => "Sign-in failed",
+            _ => "Signed out",
+        };
+        set { _accountStatusMessage = value; Raise(); }
+    }
 
     public AudioDeviceInfo? SelectedMicrophone
     {
@@ -138,18 +175,125 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     public ICommand SaveSettingsCommand { get; }
     public ICommand RefreshDevicesCommand { get; }
     public ICommand ToggleMuteCommand { get; }
+    public ICommand SignInCommand { get; }
+    public ICommand SignOutCommand { get; }
 
     public MainViewModel()
     {
         Settings = AppSettings.Load();
+        _authOptions = AuthenticationOptions.FromEnvironment();
 
-        StartCommand = new RelayCommand(async () => await StartAsync(), () => !IsRunning);
+        StartCommand = new RelayCommand(async () => await StartAsync(), () => !IsRunning && IsSignedIn);
         StopCommand = new RelayCommand(async () => await StopAsync(), () => IsRunning);
         SaveSettingsCommand = new RelayCommand(() => Settings.Save(), () => true);
         RefreshDevicesCommand = new RelayCommand(RefreshDevices, () => true);
         ToggleMuteCommand = new RelayCommand(() => IsMicrophoneMuted = !IsMicrophoneMuted, () => IsRunning);
+        SignInCommand = new RelayCommand(async () => await SignInAsync(), () => !IsSignedIn);
+        SignOutCommand = new RelayCommand(async () => await SignOutAsync(), () => IsSignedIn);
 
         RefreshDevices();
+    }
+
+    /// <summary>
+    /// Called once after the window loads (docs §21 startup lifecycle) — attempts a
+    /// SILENT-ONLY sign-in against any cached account (never launches a browser
+    /// unprompted, per the explicit startup rule) and, if that succeeds, verifies
+    /// current backend account usability via a lightweight authenticated call
+    /// (docs §16: token-renewal success alone is never treated as evidence of account
+    /// usability). Never blocks the UI thread and never throws to its caller.
+    /// </summary>
+    public async Task InitializeAsync()
+    {
+        if (!_authOptions.IsConfigured)
+        {
+            AccountStatusMessage = "Sign-in is not configured for this build.";
+            return;
+        }
+
+        try
+        {
+            var cacheStore = new DpapiTokenCacheStore();
+            var msalProvider = await MsalTokenProvider.CreateAsync(_authOptions, cacheStore);
+            _tokenProvider = msalProvider;
+            _apiClient = new AutraxisApiClient(_httpClient, msalProvider, _authOptions);
+
+            var authService = new AuthenticationService(msalProvider);
+            authService.StateChanged += (_, state) => Application.Current.Dispatcher.Invoke(() => AuthState = state);
+            _authService = authService;
+
+            await authService.TrySilentSignInAsync();
+            AuthState = authService.State;
+
+            if (AuthState == AuthenticationState.SignedIn)
+                await VerifyAccountUsableAsync();
+        }
+        catch (Exception ex)
+        {
+            // Configuration/initialization failure must never crash startup or
+            // silently enable an unauthenticated path — surfaced as a status message.
+            AccountStatusMessage = $"Sign-in unavailable: {ex.Message}";
+        }
+    }
+
+    private async Task SignInAsync()
+    {
+        if (_authService is null)
+        {
+            AccountStatusMessage = "Sign-in is not configured for this build.";
+            return;
+        }
+
+        try
+        {
+            await _authService.SignInAsync();
+            AccountStatusMessage = "";
+            await VerifyAccountUsableAsync();
+        }
+        catch (AuthenticationRequiredException)
+        {
+            AccountStatusMessage = "Sign-in was cancelled or could not complete.";
+        }
+        catch (OperationCanceledException)
+        {
+            AccountStatusMessage = "Sign-in was cancelled.";
+        }
+    }
+
+    private async Task SignOutAsync()
+    {
+        if (IsRunning) await StopAsync();
+        if (_authService is not null) await _authService.SignOutAsync();
+        _deviceId = null; // do not carry a stale device identity across a different signed-in account (docs §14 multi-account)
+        AccountStatusMessage = "";
+    }
+
+    /// <summary>
+    /// Docs §16: a successful (silent or interactive) token acquisition proves only
+    /// that Entra still recognizes the identity — it says nothing about whether the
+    /// AUTRAXIS Account is currently Active. This makes exactly one real, fresh,
+    /// authenticated backend call (GET /profile — already the lightest existing probe)
+    /// and reacts to ITS response, never to token-acquisition success alone.
+    /// </summary>
+    private async Task VerifyAccountUsableAsync()
+    {
+        if (_apiClient is null) return;
+
+        try
+        {
+            await _apiClient.GetProfileAsync();
+            AccountStatusMessage = "";
+        }
+        catch (AutraxisApiException ex) when (ex.Category is ApiErrorCategory.AccountNotUsable)
+        {
+            // Deliberately generic (docs §16/§19) — Pending/Suspended/Disabled/Closed
+            // and a denied provisioning attempt are all indistinguishable here, by
+            // the backend's own anti-enumeration design; this UI must not guess.
+            AccountStatusMessage = "Your account isn't available right now.";
+        }
+        catch (AutraxisApiException ex) when (ex.Category is ApiErrorCategory.NetworkUnavailable or ApiErrorCategory.ServiceUnavailable)
+        {
+            AccountStatusMessage = "Cannot reach the AUTRAXIS service right now.";
+        }
     }
 
     private void RaiseCommands()
@@ -157,6 +301,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
         (StartCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (StopCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (ToggleMuteCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        (SignInCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        (SignOutCommand as RelayCommand)?.RaiseCanExecuteChanged();
     }
 
     private void RefreshDevices()
@@ -171,6 +317,38 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
         Raise(nameof(SelectedRemoteInput));
         Raise(nameof(SelectedEnglishOutput));
         Raise(nameof(SelectedGermanOutput));
+    }
+
+    /// <summary>
+    /// Phase 7.1: registers (once per signed-in session) the AUTRAXIS logical device
+    /// this application instance represents — server-generated Device.Id only, never
+    /// a hardware fingerprint (docs §18, Phase 6.7 unchanged). Pooled MaxActiveDevices
+    /// enforcement is entirely server-side; this method surfaces whatever the backend
+    /// decides, it does not itself enforce any limit.
+    /// </summary>
+    private async Task<Guid> EnsureDeviceRegisteredAsync(CancellationToken ct)
+    {
+        if (_deviceId is { } existing) return existing;
+
+        var device = await _apiClient!.RegisterDeviceAsync("Windows", Environment.MachineName, ct);
+        _deviceId = device.Id;
+        return device.Id;
+    }
+
+    /// <summary>
+    /// Phase 7.1 — THE production customer-application provider-access path,
+    /// replacing the retired direct <c>AZURE_SPEECH_KEY</c>/subscription-key
+    /// construction entirely (docs §18/§23). Obtains a short-lived Azure STS
+    /// credential from the AUTRAXIS backend (Phase 6.8, unchanged) and builds the
+    /// provider via <see cref="AzureSpeechTranslationProvider.FromAuthorizationToken"/>
+    /// — the long-lived master key never reaches this process. The returned
+    /// credential is held only in the local variables of this call (and the resulting
+    /// provider's own short-lived internal use) — never persisted, never logged.
+    /// </summary>
+    private async Task<AzureSpeechTranslationProvider> CreateAuthenticatedProviderAsync(Guid deviceId, string voiceName, CancellationToken ct)
+    {
+        var grant = await _apiClient!.RequestProviderAccessAsync(deviceId, "AzureSpeech", "SpeechRecognition", ct);
+        return AzureSpeechTranslationProvider.FromAuthorizationToken(grant.AccessToken, grant.Region, voiceName, _diagnosticLogger);
     }
 
     private async Task StartAsync()
@@ -192,6 +370,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
             return;
         }
 
+        if (!IsSignedIn || _apiClient is null)
+        {
+            LastError = "Please sign in before starting a session.";
+            Status = "Configuration error";
+            return;
+        }
+
         Settings.Save();
         _cts = new CancellationTokenSource();
         LastError = null;
@@ -202,6 +387,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
 
         try
         {
+            var deviceId = await EnsureDeviceRegisteredAsync(_cts.Token);
+
+            // One AUTRAXIS translation session represents this bidirectional
+            // customer session (Phase 6.9, unchanged) — duration/usage are computed
+            // entirely server-side; this client never submits a duration or amount.
+            var session = await _apiClient.StartTranslationSessionAsync(deviceId, clientSessionId: null, direction: "en-US:de-DE", _cts.Token);
+            _activeSessionId = session.SessionId;
+
             var micToGermanSession = new Core.Session.TranslationSession
             {
                 Direction = SessionDirection.EnglishMicToGerman,
@@ -212,7 +405,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
                 micToGermanSession,
                 new AudioCaptureSource(Settings.MicrophoneDeviceId!, CaptureKind.Microphone),
                 new AudioPlaybackSink(Settings.GermanOutputDeviceId!),
-                new AzureSpeechTranslationProvider(Settings.AzureSpeechKey!, Settings.AzureSpeechRegion!, "de-DE-KatjaNeural", _diagnosticLogger));
+                await CreateAuthenticatedProviderAsync(deviceId, "de-DE-KatjaNeural", _cts.Token));
 
             var remoteToEnglishSession = new Core.Session.TranslationSession
             {
@@ -224,7 +417,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
                 remoteToEnglishSession,
                 new AudioCaptureSource(Settings.RemoteAudioInputDeviceId!, CaptureKind.SystemLoopback),
                 new AudioPlaybackSink(Settings.EnglishOutputDeviceId!),
-                new AzureSpeechTranslationProvider(Settings.AzureSpeechKey!, Settings.AzureSpeechRegion!, "en-US-JennyNeural", _diagnosticLogger));
+                await CreateAuthenticatedProviderAsync(deviceId, "en-US-JennyNeural", _cts.Token));
 
             HookTranscript(_micToGerman, "EN→DE");
             HookTranscript(_remoteToEnglish, "DE→EN");
@@ -239,6 +432,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
             IsRunning = true;
             Status = "Running";
             _ = LatencyLoop(_cts.Token);
+
+            _heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            _ = HeartbeatLoop(_activeSessionId.Value, _heartbeatCts.Token);
+        }
+        catch (AutraxisApiException ex)
+        {
+            LastError = MapApiErrorToMessage(ex);
+            Status = "Error";
+            await StopAsync();
         }
         catch (Exception ex)
         {
@@ -246,6 +448,41 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
             Status = "Error";
             await StopAsync();
         }
+    }
+
+    private static string MapApiErrorToMessage(AutraxisApiException ex) => ex.Category switch
+    {
+        ApiErrorCategory.AuthenticationRequired => "Please sign in again.",
+        ApiErrorCategory.AccountNotUsable => "Your account isn't available right now.",
+        ApiErrorCategory.DeviceNotAuthorized => "This device is not authorized. Check your device list.",
+        ApiErrorCategory.EntitlementDenied => "Your plan does not currently allow this.",
+        ApiErrorCategory.ProviderAccessDenied => "Translation service access was denied.",
+        ApiErrorCategory.NetworkUnavailable or ApiErrorCategory.ServiceUnavailable => "Cannot reach the AUTRAXIS service right now.",
+        _ => "Could not start the session.",
+    };
+
+    /// <summary>
+    /// Docs §19/§12: heartbeats keep the server-side lease alive; a 401 is handled
+    /// transparently by the shared bounded renew-and-retry policy inside
+    /// <see cref="IAutraxisApiClient"/> (heartbeat is already idempotent server-side,
+    /// Phase 6.9 unchanged, so a renew-and-retry can never double-count usage). This
+    /// loop never surfaces a heartbeat failure as a hard error — a transient miss is
+    /// safely absorbed by Phase 6.9's own lease window; only StopAsync/session end is
+    /// authoritative for terminating client-visible state.
+    /// </summary>
+    private async Task HeartbeatLoop(Guid sessionId, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(20), ct);
+                if (ct.IsCancellationRequested) break;
+                try { await _apiClient!.HeartbeatTranslationSessionAsync(sessionId, ct); }
+                catch (AutraxisApiException) { /* absorbed — see doc comment above */ }
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     private void HookTranscript(DirectionPipeline pipeline, string label)
@@ -342,10 +579,19 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     private async Task StopAsync()
     {
         _cts?.Cancel();
+        _heartbeatCts?.Cancel();
         if (_micToGerman != null) await _micToGerman.DisposeAsync();
         if (_remoteToEnglish != null) await _remoteToEnglish.DisposeAsync();
         _micToGerman = null;
         _remoteToEnglish = null;
+
+        if (_activeSessionId is { } sessionId && _apiClient is not null)
+        {
+            try { await _apiClient.EndTranslationSessionAsync(sessionId, CancellationToken.None); }
+            catch (AutraxisApiException) { /* best-effort — Phase 6.9's lease/expiry reconciliation closes this out even if this call fails, see docs §19 */ }
+        }
+        _activeSessionId = null;
+
         IsRunning = false;
         Status = "Stopped";
     }
@@ -353,6 +599,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync();
+        _httpClient.Dispose();
     }
 }
 

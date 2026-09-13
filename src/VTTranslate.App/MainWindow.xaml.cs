@@ -15,6 +15,13 @@ public partial class MainWindow : Window
         DataContext = _viewModel;
 
         ApplyBranding();
+        Loaded += Window_Loaded;
+    }
+
+    /// <summary>Phase 7.1: attempts a silent-only sign-in check once the window is ready — never launches an interactive browser prompt from here (see MainViewModel.InitializeAsync's own doc comment).</summary>
+    private async void Window_Loaded(object sender, RoutedEventArgs e)
+    {
+        await _viewModel.InitializeAsync();
     }
 
     private void ApplyBranding()

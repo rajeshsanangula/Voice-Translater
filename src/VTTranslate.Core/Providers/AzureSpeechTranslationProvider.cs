@@ -39,7 +39,8 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
 {
     private const int MaxReconnectAttempts = 5;
 
-    private readonly string _subscriptionKey;
+    private readonly string? _subscriptionKey;
+    private readonly string? _authorizationToken;
     private readonly string _region;
     private readonly string _voiceName;
     private readonly SemaphoreSlim _connectionLock = new(1, 1);
@@ -143,6 +144,46 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
         _experimentalStabilityEngineFactory = experimentalStabilityEngineFactory ?? (() => new BestPartialStabilityEngine());
     }
 
+    private AzureSpeechTranslationProvider(
+        string? subscriptionKey,
+        string? authorizationToken,
+        string region,
+        string voiceName,
+        IDiagnosticLogger? logger,
+        Func<IStreamingStabilityEngine>? stabilityEngineFactory,
+        Func<IStreamingStabilityEngine>? experimentalStabilityEngineFactory)
+    {
+        _subscriptionKey = subscriptionKey;
+        _authorizationToken = authorizationToken;
+        _region = region;
+        _voiceName = voiceName;
+        _logger = logger ?? NullDiagnosticLogger.Instance;
+        _stabilityEngineFactory = stabilityEngineFactory ?? (() => new PrefixStabilityEngine());
+        _experimentalStabilityEngineFactory = experimentalStabilityEngineFactory ?? (() => new BestPartialStabilityEngine());
+    }
+
+    /// <summary>
+    /// Phase 7.1 — the production customer-application factory. Builds a provider
+    /// authenticated with a short-lived Azure STS authorization token (obtained by the
+    /// customer application from the AUTRAXIS backend's <c>POST /provider-access</c>,
+    /// Phase 6.8), never a long-lived subscription/master key. This is the ONLY
+    /// constructor path the production WPF customer application may use — see
+    /// <c>VTTranslate.App.MainViewModel</c>'s translation-provider factory and
+    /// docs/phase-7.1-customer-authentication-client-and-entra-integration.md §18/§23.
+    /// The existing <c>(subscriptionKey, region, voiceName, ...)</c> constructor above
+    /// is UNCHANGED and remains available only for controlled test/development
+    /// harnesses that are never reachable from the authenticated customer path (see
+    /// <c>VTTranslate.Core.Config.AppSettings.AzureSpeechKey</c>'s own doc comment).
+    /// </summary>
+    public static AzureSpeechTranslationProvider FromAuthorizationToken(
+        string authorizationToken,
+        string region,
+        string voiceName,
+        IDiagnosticLogger? logger = null,
+        Func<IStreamingStabilityEngine>? stabilityEngineFactory = null,
+        Func<IStreamingStabilityEngine>? experimentalStabilityEngineFactory = null) =>
+        new(subscriptionKey: null, authorizationToken, region, voiceName, logger, stabilityEngineFactory, experimentalStabilityEngineFactory);
+
     public async Task StartAsync(string sourceLanguage, string targetLanguage, CancellationToken ct)
     {
         if (Interlocked.CompareExchange(ref _startedFlag, 1, 0) != 0)
@@ -168,7 +209,14 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
     /// <summary>Must be called while holding <see cref="_connectionLock"/>.</summary>
     private async Task CreateAndStartRecognizerLockedAsync()
     {
-        var config = SpeechTranslationConfig.FromSubscription(_subscriptionKey, _region);
+        // Phase 7.1: the customer application's production path supplies a short-lived
+        // Azure STS authorization token (via FromAuthorizationToken) rather than the
+        // long-lived subscription key — the master key never reaches this class from
+        // that path at all; it is only ever present here for the pre-existing
+        // subscription-key constructor used by controlled test/development harnesses.
+        var config = _authorizationToken is not null
+            ? SpeechTranslationConfig.FromAuthorizationToken(_authorizationToken, _region)
+            : SpeechTranslationConfig.FromSubscription(_subscriptionKey, _region);
         config.SpeechRecognitionLanguage = _sourceLanguage;
         var targetTwoLetter = ToTwoLetter(_targetLanguage);
         config.AddTargetLanguage(targetTwoLetter);

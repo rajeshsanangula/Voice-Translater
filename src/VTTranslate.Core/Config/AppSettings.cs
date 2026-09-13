@@ -11,6 +11,18 @@ namespace VTTranslate.Core.Config;
 /// </summary>
 public sealed class AppSettings
 {
+    /// <summary>
+    /// TEST/DEVELOPMENT-ONLY — the long-lived Azure Speech master subscription key.
+    /// Phase 7.1 retires this from the production customer application path entirely:
+    /// the authenticated customer application obtains a short-lived, backend-issued
+    /// Azure STS token via <c>POST /provider-access</c> (Phase 6.8) and constructs
+    /// <c>AzureSpeechTranslationProvider.FromAuthorizationToken(...)</c> instead — see
+    /// <c>VTTranslate.App.MainViewModel</c> and
+    /// docs/phase-7.1-customer-authentication-client-and-entra-integration.md §18/§23.
+    /// This property remains only for pre-commercial-MVP developer/manual-test
+    /// harnesses that never run through the authenticated customer application code
+    /// path; it must never be read by that path.
+    /// </summary>
     [JsonIgnore]
     public string? AzureSpeechKey => GetEnv("AZURE_SPEECH_KEY");
 
