@@ -36,10 +36,15 @@ jobs:
       - name: Confirm Docker is available (required for real-PostgreSQL tests)
         run: docker version
 
-      - name: Build full solution
-        run: dotnet build VTTranslate.sln --configuration Release
+      - name: "Build backend projects only (not VTTranslate.App/Core — see below)"
+        # This workflow verifies Phase 6.5 PostgreSQL persistence, not the Windows WPF
+        # app — so it builds only the backend test project's own dependency graph
+        # (Domain -> Application -> Infrastructure -> Api -> Tests), never
+        # VTTranslate.sln. VTTranslate.App (net8.0-windows, WPF) is never referenced by
+        # that graph and is therefore never built here, on Ubuntu or anywhere else.
+        run: dotnet build tests/VTTranslate.Backend.Tests/VTTranslate.Backend.Tests.csproj --configuration Release
 
-      - name: Run backend test suite (includes 21 real-PostgreSQL Testcontainers tests)
+      - name: "Run backend test suite (includes 21 real-PostgreSQL Testcontainers tests)"
         # Run exactly as implemented — no filter excludes EfPostgresPersistenceTests, no
         # environment variable disables Docker, no substitute connection string is
         # supplied. --logger reports exact pass/skip/fail counts in the job output.
@@ -51,9 +56,17 @@ jobs:
           --results-directory ./test-results
 
       - name: "Run existing Windows/Core test suite (baseline: 399/399)"
+        # VTTranslate.Core.Tests references VTTranslate.Core, which targets
+        # net8.0-windows (WASAPI/NAudio) — unlike the backend, this dependency is real
+        # and unavoidable, so EnableWindowsTargeting=true is passed here as a CI-only
+        # MSBuild property override on the command line. No .csproj is modified; the
+        # property only relaxes the SDK's "don't cross-compile Windows-only APIs on a
+        # non-Windows OS" guard for this one CI step, it does not change what the
+        # project targets or what code runs.
         run: >
           dotnet test tests/VTTranslate.Core.Tests/VTTranslate.Core.Tests.csproj
           --configuration Release
+          -p:EnableWindowsTargeting=true
           --logger "console;verbosity=detailed"
           --logger "trx;LogFileName=core-tests.trx"
           --results-directory ./test-results
