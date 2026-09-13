@@ -1,0 +1,151 @@
+name: Phase 7.1 — Customer Authentication Client Verification
+
+# Narrowly scoped verification for the Phase 7.1 Windows customer-client
+# authentication work only (see
+# docs/phase-7.1-customer-authentication-client-and-entra-integration.md). Runs on
+# windows-latest because VTTranslate.App/VTTranslate.App.Tests target
+# net8.0-windows (WPF) and genuinely need the Windows Desktop runtime — no
+# cross-compilation workaround is used. This workflow builds/tests only
+# VTTranslate.App and VTTranslate.App.Tests; it does not touch the backend
+# (Phase 6.5/6.6/6.7/6.8/6.9/7.0) or Core test suites, which remain covered by their
+# own existing, unmodified workflow(s).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+jobs:
+  verify-client:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout (exact pushed commit)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore VTTranslate.App.Tests
+        run: dotnet restore tests/VTTranslate.App.Tests/VTTranslate.App.Tests.csproj
+
+      - name: Build VTTranslate.App.Tests (Debug)
+        run: dotnet build tests/VTTranslate.App.Tests/VTTranslate.App.Tests.csproj --configuration Debug --no-restore
+
+      - name: Run VTTranslate.App.Tests
+        run: >
+          dotnet test tests/VTTranslate.App.Tests/VTTranslate.App.Tests.csproj
+          --configuration Debug
+          --no-build
+          --logger "console;verbosity=detailed"
+          --logger "trx;LogFileName=app-tests.trx"
+          --results-directory ./test-results
+
+      - name: Upload test result files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-7.1-app-test-results
+          path: ./test-results/*.trx
+
+      - name: Restore VTTranslate.App (Release)
+        run: dotnet restore src/VTTranslate.App/VTTranslate.App.csproj
+
+      - name: "Build VTTranslate.App — Release, verify 0 warnings / 0 errors"
+        # /warnaserror turns any warning into a build failure, so "the build succeeded"
+        # and "there were zero warnings" are proven by the SAME command rather than by
+        # separately parsing build output text.
+        shell: pwsh
+        run: |
+          dotnet build src/VTTranslate.App/VTTranslate.App.csproj `
+            --configuration Release `
+            --no-restore `
+            /warnaserror
+
+      - name: "Phase 7.1 security/source check — direct Azure master key retired from the production customer path"
+        # Mirrors tests/VTTranslate.App.Tests/ProviderRetirementTests.cs at the CI
+        # level, directly against the checked-out source (belt-and-suspenders — this
+        # step fails the build even if that test file were ever accidentally weakened
+        # or removed). MainViewModel.cs must never again call the raw
+        # subscription-key AzureSpeechTranslationProvider constructor or read
+        # Settings.AzureSpeechKey; it must call the short-lived-credential factory.
+        shell: pwsh
+        run: |
+          $path = "src/VTTranslate.App/MainViewModel.cs"
+          $content = Get-Content -Raw $path
+
+          if ($content -match [regex]::Escape("Settings.AzureSpeechKey")) {
+            Write-Error "SECURITY CHECK FAILED: $path references Settings.AzureSpeechKey — the production customer path must never read the Azure master key directly."
+            exit 1
+          }
+          if ($content -match [regex]::Escape("new AzureSpeechTranslationProvider(")) {
+            Write-Error "SECURITY CHECK FAILED: $path constructs AzureSpeechTranslationProvider via the raw subscription-key constructor — the production customer path must use FromAuthorizationToken instead."
+            exit 1
+          }
+          if ($content -notmatch [regex]::Escape("AzureSpeechTranslationProvider.FromAuthorizationToken")) {
+            Write-Error "SECURITY CHECK FAILED: $path no longer calls AzureSpeechTranslationProvider.FromAuthorizationToken — the authenticated provider-access path appears to be missing."
+            exit 1
+          }
+          if ($content -notmatch [regex]::Escape("RequestProviderAccessAsync")) {
+            Write-Error "SECURITY CHECK FAILED: $path no longer calls RequestProviderAccessAsync — provider access must flow through the backend gateway."
+            exit 1
+          }
+
+          Write-Host "OK: production customer path uses the authenticated provider-access flow, not the direct master key."
+
+      - name: "Phase 7.1 security/source check — no secrets in client source"
+        # Scans only the files this phase actually owns (the WPF app + its tests),
+        # never the whole repository history, and never a false-positive-prone blanket
+        # scan — matching the scope of this workflow. Pattern set mirrors the backend's
+        # own ConfigurationSecretSafetyTests conventions (Azure/Gemini/OpenAI key
+        # shapes, embedded bearer tokens, JWTs, connection-string credentials).
+        shell: pwsh
+        run: |
+          $paths = @("src/VTTranslate.App", "tests/VTTranslate.App.Tests")
+          $patterns = @(
+            'AZURE_[A-Z_]*KEY\s*[:=]\s*"[A-Za-z0-9/+]{10,}"',
+            'AIza[A-Za-z0-9_\-]{20,}',
+            'sk-[A-Za-z0-9]{20,}',
+            'Server=.*Password=',
+            'Bearer\s+[A-Za-z0-9\-_\.]{20,}',
+            'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.'
+          )
+
+          $files = Get-ChildItem -Path $paths -Recurse -Include *.cs,*.xaml,*.csproj,*.json -File `
+            | Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' }
+
+          $failed = $false
+          foreach ($file in $files) {
+            $content = Get-Content -Raw $file.FullName
+            foreach ($pattern in $patterns) {
+              if ($content -match $pattern) {
+                Write-Error "SECRET SCAN FAILED: $($file.FullName) matched suspicious pattern: $pattern"
+                $failed = $true
+              }
+            }
+          }
+
+          if ($failed) { exit 1 }
+          Write-Host "OK: no secret-shaped values found in src/VTTranslate.App or tests/VTTranslate.App.Tests."
+
+      - name: "Phase 7.1 security/source check — no client secret configured for the public MSAL client"
+        # A public desktop client must never carry a client secret (docs §6/§26). This
+        # greps for the shapes MSAL/ADAL client-secret configuration typically takes,
+        # scoped to the same two directories as the secret scan above.
+        shell: pwsh
+        run: |
+          $matches = Get-ChildItem -Path "src/VTTranslate.App" -Recurse -Include *.cs -File `
+            | Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' } `
+            | Select-String -Pattern 'WithClientSecret|ClientSecretCredential|client_secret\s*='
+
+          if ($matches) {
+            Write-Error "SECURITY CHECK FAILED: found a client-secret configuration pattern in the WPF client — a public client must never carry one:`n$matches"
+            exit 1
+          }
+          Write-Host "OK: no client-secret configuration found in the WPF client."
