@@ -80,8 +80,13 @@ public sealed class EfPostgresPersistenceTests(PostgresFixture fixture) : IClass
         var tableNames = new[] { "accounts", "profiles", "plans", "entitlements", "subscriptions", "devices", "sessions", "usage_records", "audit_events" };
         foreach (var table in tableNames)
         {
+            // EF Core's SqlQuery<T> for a scalar T wraps the raw SQL as
+            // `SELECT t.Value FROM (<sql>) AS t` and requires the raw SQL's own result
+            // column to be named "Value" — PostgreSQL names an unaliased EXISTS(...)
+            // column "exists", not "Value", so the wrapper's `t.Value` reference doesn't
+            // exist unless the column is explicitly aliased here.
             var exists = await db.Database.SqlQuery<bool>(
-                $"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = {table})").FirstAsync();
+                $"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = {table}) AS \"Value\"").FirstAsync();
             Assert.True(exists, $"expected migrated table '{table}' to exist");
         }
     }
