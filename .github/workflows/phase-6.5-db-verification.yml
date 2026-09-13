@@ -50,7 +50,7 @@ jobs:
           --logger "trx;LogFileName=backend-tests.trx"
           --results-directory ./test-results
 
-      - name: Run existing Windows/Core test suite (baseline: 399/399)
+      - name: "Run existing Windows/Core test suite (baseline: 399/399)"
         run: >
           dotnet test tests/VTTranslate.Core.Tests/VTTranslate.Core.Tests.csproj
           --configuration Release
