@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Testcontainers.PostgreSql;
 using VTTranslate.Backend.Application.Devices;
+using VTTranslate.Backend.Application.Entitlements;
+using VTTranslate.Backend.Application.Sessions;
 using VTTranslate.Backend.Domain;
 using VTTranslate.Backend.Domain.Entities;
 using VTTranslate.Backend.Domain.Enums;
@@ -79,7 +81,7 @@ public sealed class EfPostgresPersistenceTests(PostgresFixture fixture) : IClass
         var pending = await db.Database.GetPendingMigrationsAsync();
         Assert.Empty(pending); // fixture already migrated — nothing left pending
 
-        var tableNames = new[] { "accounts", "profiles", "plans", "entitlements", "subscriptions", "devices", "sessions", "usage_records", "audit_events", "billing_events", "provider_access_grants" };
+        var tableNames = new[] { "accounts", "profiles", "plans", "entitlements", "subscriptions", "devices", "sessions", "usage_records", "audit_events", "billing_events", "provider_access_grants", "translation_sessions" };
         foreach (var table in tableNames)
         {
             // EF Core's SqlQuery<T> for a scalar T wraps the raw SQL as
@@ -785,5 +787,186 @@ public sealed class EfPostgresPersistenceTests(PostgresFixture fixture) : IClass
         var reloaded = await freshDb.Accounts.FirstAsync(a => a.Id == account.Id);
         Assert.Equal(AccountStatus.Suspended, reloaded.Status);
         Assert.False(reloaded.IsUsable);
+    }
+
+    // ---- Phase 6.9: TranslationSession persistence / partial unique index / rollback / concurrency ----
+
+    [SkipIfNoDockerFact]
+    public async Task TranslationSession_PersistAndQueryByAccount()
+    {
+        var account = NewAccount($"acct-session-persist-{Guid.NewGuid()}");
+        var device = new Device { Id = Guid.NewGuid(), AccountId = account.Id, Platform = DevicePlatform.Windows, Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow };
+        var session = new TranslationSession { Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = device.Id, ClientSessionId = "corr-persist", State = TranslationSessionState.Active, StartedAt = DateTimeOffset.UtcNow, LastActivityAt = DateTimeOffset.UtcNow };
+
+        await using (var db = fixture.CreateContext())
+        {
+            db.Accounts.Add(account);
+            db.Devices.Add(device);
+            db.TranslationSessions.Add(session);
+            await db.SaveChangesAsync();
+        }
+
+        await using var readDb = fixture.CreateContext();
+        var loaded = await readDb.TranslationSessions.Where(s => s.AccountId == account.Id).ToListAsync();
+        Assert.Single(loaded);
+        Assert.Equal(TranslationSessionState.Active, loaded[0].State);
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task TranslationSession_ForeignKeyViolation_RejectedForUnknownDevice()
+    {
+        var account = NewAccount($"acct-session-fk-{Guid.NewGuid()}");
+        await using var db = fixture.CreateContext();
+        db.Accounts.Add(account);
+        db.TranslationSessions.Add(new TranslationSession { Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = Guid.NewGuid(), State = TranslationSessionState.Active, StartedAt = DateTimeOffset.UtcNow, LastActivityAt = DateTimeOffset.UtcNow });
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task TranslationSession_TwoActiveSameClientSessionId_RejectedByPartialUniqueIndex()
+    {
+        var account = NewAccount($"acct-session-dup-{Guid.NewGuid()}");
+        var device = new Device { Id = Guid.NewGuid(), AccountId = account.Id, Platform = DevicePlatform.Windows, Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow };
+        await using var db = fixture.CreateContext();
+        db.Accounts.Add(account);
+        db.Devices.Add(device);
+        db.TranslationSessions.Add(new TranslationSession { Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = device.Id, ClientSessionId = "corr-dup", State = TranslationSessionState.Active, StartedAt = DateTimeOffset.UtcNow, LastActivityAt = DateTimeOffset.UtcNow });
+        await db.SaveChangesAsync();
+
+        db.TranslationSessions.Add(new TranslationSession { Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = device.Id, ClientSessionId = "corr-dup", State = TranslationSessionState.Active, StartedAt = DateTimeOffset.UtcNow, LastActivityAt = DateTimeOffset.UtcNow });
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task TranslationSession_OneActiveOneTerminal_SameClientSessionId_AllowedTogether()
+    {
+        // The whole point of scoping the unique index to State = 'Active': a terminal
+        // (Ended) row must NOT block a genuinely new session reusing the same
+        // clientSessionId after reconnect.
+        var account = NewAccount($"acct-session-reconnect-{Guid.NewGuid()}");
+        var device = new Device { Id = Guid.NewGuid(), AccountId = account.Id, Platform = DevicePlatform.Windows, Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow };
+        await using var db = fixture.CreateContext();
+        db.Accounts.Add(account);
+        db.Devices.Add(device);
+        db.TranslationSessions.Add(new TranslationSession { Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = device.Id, ClientSessionId = "corr-reconnect", State = TranslationSessionState.Ended, StartedAt = DateTimeOffset.UtcNow.AddMinutes(-5), LastActivityAt = DateTimeOffset.UtcNow.AddMinutes(-5), TerminalAt = DateTimeOffset.UtcNow.AddMinutes(-4) });
+        await db.SaveChangesAsync();
+
+        db.TranslationSessions.Add(new TranslationSession { Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = device.Id, ClientSessionId = "corr-reconnect", State = TranslationSessionState.Active, StartedAt = DateTimeOffset.UtcNow, LastActivityAt = DateTimeOffset.UtcNow });
+        await db.SaveChangesAsync(); // must NOT throw
+
+        await using var readDb = fixture.CreateContext();
+        var history = await readDb.TranslationSessions.Where(s => s.AccountId == account.Id).ToListAsync();
+        Assert.Equal(2, history.Count);
+        Assert.Single(history, s => s.State == TranslationSessionState.Active);
+        Assert.Single(history, s => s.State == TranslationSessionState.Ended);
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task TranslationSessionEnd_ExceptionInsideTransaction_RollsBackBothSessionAndUsageWrites()
+    {
+        var account = NewAccount($"acct-session-txn-{Guid.NewGuid()}");
+        var device = new Device { Id = Guid.NewGuid(), AccountId = account.Id, Platform = DevicePlatform.Windows, Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow };
+        var session = new TranslationSession { Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = device.Id, State = TranslationSessionState.Active, StartedAt = DateTimeOffset.UtcNow.AddSeconds(-30), LastActivityAt = DateTimeOffset.UtcNow.AddSeconds(-30) };
+
+        await using (var seedDb = fixture.CreateContext())
+        {
+            seedDb.Accounts.Add(account);
+            seedDb.Devices.Add(device);
+            seedDb.TranslationSessions.Add(session);
+            await seedDb.SaveChangesAsync();
+        }
+
+        await using (var txnDb = fixture.CreateContext())
+        {
+            var unitOfWork = new EfUnitOfWork(txnDb);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => unitOfWork.ExecuteInTransactionAsync<object?>(async ct =>
+            {
+                var toEnd = await txnDb.TranslationSessions.FirstAsync(s => s.Id == session.Id, ct);
+                toEnd.State = TranslationSessionState.Ended;
+                toEnd.TerminalAt = DateTimeOffset.UtcNow;
+
+                txnDb.UsageRecords.Add(new UsageRecord { Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = device.Id, Direction = "en-US:de-DE", SecondsUsed = 30, Source = UsageRecordSource.ServerDerived, PeriodBucket = DateTimeOffset.UtcNow.ToString("yyyy-MM"), RecordedAt = DateTimeOffset.UtcNow });
+
+                await txnDb.SaveChangesAsync(ct);
+                throw new InvalidOperationException("simulated failure after both writes, before commit");
+            }, CancellationToken.None));
+        }
+
+        await using var readDb = fixture.CreateContext();
+        var reloadedSession = await readDb.TranslationSessions.FirstAsync(s => s.Id == session.Id);
+        var usageCount = await readDb.UsageRecords.CountAsync(u => u.AccountId == account.Id);
+
+        Assert.Equal(TranslationSessionState.Active, reloadedSession.State); // unchanged — rolled back
+        Assert.Equal(0, usageCount); // unchanged — rolled back, no orphaned usage record
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task ConcurrentSessionStart_NeverExceedsUsageLimit_RealPostgresLock()
+    {
+        const int usageLimitSeconds = 300; // remaining "allowance" is small and shared
+        const int concurrentAttempts = 8;
+
+        var account = NewAccount($"acct-session-race-{Guid.NewGuid()}");
+        var plan = new Plan { Id = Guid.NewGuid(), Name = "Session Race Plan", IsPubliclyPurchasable = true };
+        var maxDevicesEntitlement = new Entitlement { Id = Guid.NewGuid(), PlanId = plan.Id, Key = EntitlementKeys.MaxActiveDevices, Value = concurrentAttempts.ToString() };
+        var usageLimitEntitlement = new Entitlement { Id = Guid.NewGuid(), PlanId = plan.Id, Key = EntitlementKeys.UsageLimitSecondsPerPeriod, Value = usageLimitSeconds.ToString() };
+        var subscription = new Subscription
+        {
+            Id = Guid.NewGuid(), AccountId = account.Id, PlanId = plan.Id, Status = SubscriptionStatus.Active,
+            CurrentPeriodStart = DateTimeOffset.UtcNow.AddDays(-1), CurrentPeriodEnd = DateTimeOffset.UtcNow.AddDays(30),
+            CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
+        };
+        var deviceIds = Enumerable.Range(0, concurrentAttempts).Select(_ => Guid.NewGuid()).ToList();
+
+        // Pre-existing ServerDerived usage leaves exactly ZERO remaining allowance —
+        // every concurrent session-start attempt below must be denied by UsageDenied,
+        // and none may slip through and record additional usage.
+        var existingUsage = new UsageRecord { Id = Guid.NewGuid(), AccountId = account.Id, DeviceId = deviceIds[0], Direction = "en-US:de-DE", SecondsUsed = usageLimitSeconds, Source = UsageRecordSource.ServerDerived, PeriodBucket = DateTimeOffset.UtcNow.ToString("yyyy-MM"), RecordedAt = DateTimeOffset.UtcNow };
+
+        await using (var seedDb = fixture.CreateContext())
+        {
+            seedDb.Accounts.Add(account);
+            seedDb.Plans.Add(plan);
+            seedDb.Entitlements.AddRange(maxDevicesEntitlement, usageLimitEntitlement);
+            seedDb.Subscriptions.Add(subscription);
+            seedDb.UsageRecords.Add(existingUsage);
+            foreach (var deviceId in deviceIds)
+                seedDb.Devices.Add(new Device { Id = deviceId, AccountId = account.Id, Platform = DevicePlatform.Windows, Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow });
+            await seedDb.SaveChangesAsync();
+        }
+
+        // Each concurrent "caller" gets its OWN DbContext/connection/service graph — a
+        // shared DbContext is not safe for parallel use and would not exercise the real
+        // multi-connection race this test exists to prove is closed (§21/§36: an
+        // in-memory test double must not falsely claim to prove this).
+        var tasks = deviceIds.Select(async deviceId =>
+        {
+            await using var db = fixture.CreateContext();
+            var clock = new SystemClock();
+            var devices = new EfDeviceRepository(db);
+            var subscriptions = new EfSubscriptionRepository(db);
+            var plans = new EfPlanRepository(db);
+            var accounts = new EfAccountRepository(db);
+            var unitOfWork = new EfUnitOfWork(db);
+            var audit = new EfAuditEventRepository(db);
+            var deviceService = new DeviceRegistrationService(devices, subscriptions, plans, accounts, unitOfWork, audit, clock);
+            var usageService = new VTTranslate.Backend.Application.Usage.UsageService(new EfUsageRecordRepository(db), clock);
+            var entitlementService = new EntitlementService(subscriptions, plans, deviceService, usageService, clock);
+            var sessionService = new TranslationSessionService(deviceService, entitlementService, new EfTranslationSessionRepository(db), accounts, usageService, audit, unitOfWork, clock, TimeSpan.FromSeconds(60));
+
+            var result = await sessionService.StartSessionAsync(account.Id, deviceId, null, null, CancellationToken.None);
+            return result.Outcome;
+        });
+
+        var results = await Task.WhenAll(tasks);
+
+        // Usage allowance was already fully consumed before any attempt — none may
+        // succeed; the race is over whether any attempt can slip past the exhausted
+        // allowance check due to a stale read, not over how many succeed.
+        Assert.All(results, outcome => Assert.Equal(SessionStartOutcome.UsageDenied, outcome));
+
+        await using var readDb = fixture.CreateContext();
+        var activeSessionCount = await readDb.TranslationSessions.CountAsync(s => s.AccountId == account.Id && s.State == TranslationSessionState.Active);
+        Assert.Equal(0, activeSessionCount); // the invariant, verified against real committed data
     }
 }

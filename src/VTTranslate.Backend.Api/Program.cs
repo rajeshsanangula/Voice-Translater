@@ -7,6 +7,7 @@ using VTTranslate.Backend.Application.Devices;
 using VTTranslate.Backend.Application.Entitlements;
 using VTTranslate.Backend.Application.Identity;
 using VTTranslate.Backend.Application.ProviderAccess;
+using VTTranslate.Backend.Application.Sessions;
 using VTTranslate.Backend.Application.Usage;
 using VTTranslate.Backend.Domain;
 using VTTranslate.Backend.Domain.Abstractions;
@@ -125,6 +126,7 @@ if (databaseConfigured)
     builder.Services.AddScoped<IAuditEventRepository, EfAuditEventRepository>();
     builder.Services.AddScoped<ISessionRepository, EfSessionRepository>();
     builder.Services.AddScoped<IBillingEventRepository, EfBillingEventRepository>();
+    builder.Services.AddScoped<ITranslationSessionRepository, EfTranslationSessionRepository>();
     builder.Services.AddScoped<IUnitOfWork, EfUnitOfWork>();
 }
 else
@@ -141,6 +143,7 @@ else
     builder.Services.AddSingleton<IAuditEventRepository, InMemoryAuditEventRepository>();
     builder.Services.AddSingleton<ISessionRepository, InMemorySessionRepository>();
     builder.Services.AddSingleton<IBillingEventRepository, InMemoryBillingEventRepository>();
+    builder.Services.AddSingleton<ITranslationSessionRepository, InMemoryTranslationSessionRepository>();
     builder.Services.AddSingleton<IUnitOfWork, InMemoryUnitOfWork>();
 }
 
@@ -239,6 +242,25 @@ builder.Services.AddScoped<IProviderAccessGateway>(sp => new ProviderAccessGatew
     sp.GetRequiredService<IUnitOfWork>(),
     sp.GetRequiredService<IClock>(),
     credentialLifetime));
+
+// ---- Phase 6.9: authoritative translation-session accounting ----
+// TranslationSessions:LeaseSeconds is non-secret; defaults conservatively (60s) if unset
+// — see TranslationSessionOptions's own doc comment. Provider credential issuance
+// (Phase 6.8, above) is deliberately NOT wired into this service in any way — issuing a
+// short-lived Azure token never starts/extends/ends a session and never creates usage.
+var translationSessionOptions = builder.Configuration.GetSection(TranslationSessionOptions.SectionName).Get<TranslationSessionOptions>() ?? new TranslationSessionOptions();
+var sessionLease = TimeSpan.FromSeconds(translationSessionOptions.LeaseSeconds > 0 ? translationSessionOptions.LeaseSeconds : 60);
+
+builder.Services.AddScoped<ITranslationSessionService>(sp => new TranslationSessionService(
+    sp.GetRequiredService<IDeviceRegistrationService>(),
+    sp.GetRequiredService<IEntitlementService>(),
+    sp.GetRequiredService<ITranslationSessionRepository>(),
+    sp.GetRequiredService<IAccountRepository>(),
+    sp.GetRequiredService<IUsageService>(),
+    sp.GetRequiredService<IAuditEventRepository>(),
+    sp.GetRequiredService<IUnitOfWork>(),
+    sp.GetRequiredService<IClock>(),
+    sessionLease));
 
 var app = builder.Build();
 
@@ -481,6 +503,69 @@ app.MapPost("/provider-access", async (HttpContext ctx, ProviderAccessRequest re
     };
 }).RequireAuthorization();
 
+// ---- Phase 6.9: translation-session accounting endpoints ----
+// Account derived exclusively from AccountResolutionMiddleware — never from the request
+// body. deviceId is client-supplied (must belong to the authenticated account, verified
+// by the service); accountId/usage/duration are never accepted from the client at all.
+app.MapPost("/translation-sessions", async (HttpContext ctx, StartTranslationSessionRequest request, ITranslationSessionService sessionService) =>
+{
+    if (!Guid.TryParse(request.DeviceId, out var deviceId))
+        return Results.BadRequest(new { status = "invalid_device_id" });
+
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var result = await sessionService.StartSessionAsync(account.Id, deviceId, request.ClientSessionId, request.Direction, ctx.RequestAborted);
+
+    return result.Outcome switch
+    {
+        SessionStartOutcome.Started => Results.Json(new
+        {
+            sessionId = result.Session!.Id,
+            state = result.Session.State.ToString(),
+            startedAt = result.Session.StartedAt,
+            resumed = false,
+        }, statusCode: StatusCodes.Status201Created),
+        SessionStartOutcome.Resumed => Results.Ok(new
+        {
+            sessionId = result.Session!.Id,
+            state = result.Session.State.ToString(),
+            startedAt = result.Session.StartedAt,
+            resumed = true,
+        }),
+        SessionStartOutcome.DeviceNotAuthorized => Results.Json(new { status = "device_not_authorized" }, statusCode: StatusCodes.Status403Forbidden),
+        SessionStartOutcome.EntitlementDenied => Results.Json(new { status = "entitlement_denied" }, statusCode: StatusCodes.Status403Forbidden),
+        SessionStartOutcome.UsageDenied => Results.Json(new { status = "usage_limit_exceeded" }, statusCode: StatusCodes.Status403Forbidden),
+        _ => Results.Json(new { status = "denied" }, statusCode: StatusCodes.Status403Forbidden),
+    };
+}).RequireAuthorization();
+
+app.MapPost("/translation-sessions/{id:guid}/heartbeat", async (HttpContext ctx, Guid id, ITranslationSessionService sessionService) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var result = await sessionService.HeartbeatAsync(account.Id, id, ctx.RequestAborted);
+
+    return result.Outcome switch
+    {
+        SessionOperationOutcome.Success => Results.Ok(new { sessionId = id, state = result.Session!.State.ToString(), lastActivityAt = result.Session.LastActivityAt }),
+        SessionOperationOutcome.NotFound => Results.NotFound(new { status = "session_not_found" }),
+        SessionOperationOutcome.AlreadyTerminal => Results.Json(new { status = "session_terminal", state = result.Session?.State.ToString() }, statusCode: StatusCodes.Status409Conflict),
+        _ => Results.Json(new { status = "denied" }, statusCode: StatusCodes.Status403Forbidden),
+    };
+}).RequireAuthorization();
+
+app.MapPost("/translation-sessions/{id:guid}/end", async (HttpContext ctx, Guid id, ITranslationSessionService sessionService) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var result = await sessionService.EndAsync(account.Id, id, ctx.RequestAborted);
+
+    return result.Outcome switch
+    {
+        SessionOperationOutcome.Success => Results.Ok(new { sessionId = id, state = result.Session!.State.ToString(), terminalAt = result.Session.TerminalAt }),
+        SessionOperationOutcome.NotFound => Results.NotFound(new { status = "session_not_found" }),
+        SessionOperationOutcome.AlreadyTerminal => Results.Ok(new { sessionId = id, state = result.Session?.State.ToString(), terminalAt = result.Session?.TerminalAt }), // idempotent — same success shape, not an error
+        _ => Results.Json(new { status = "denied" }, statusCode: StatusCodes.Status403Forbidden),
+    };
+}).RequireAuthorization();
+
 // Phase 6.4 AUTHORIZATION-BOUNDARY PROOF ONLY — not a product feature. Exists solely so
 // the CUSTOMER-vs-ADMIN-vs-SUPER_ADMIN role gate can be exercised end-to-end over real
 // HTTP in an integration test (see VTTranslate.Backend.Tests). Still returns the same
@@ -510,6 +595,9 @@ public sealed record RegisterDeviceRequest(string Platform, string? DisplayName)
 
 /// <summary>Phase 6.8: request body for POST /provider-access. Deliberately carries no account ID and no role/entitlement/usage value — the account is always derived from AccountResolutionMiddleware; only the target device (which must belong to that account) and the requested provider/capability are client-supplied.</summary>
 public sealed record ProviderAccessRequest(string DeviceId, string Provider, string Capability);
+
+/// <summary>Phase 6.9: request body for POST /translation-sessions. Deliberately carries no accountId/entitlementId/subscriptionId/usageAmount/usageDuration/allowedMinutes/providerSecret — the account comes from AccountResolutionMiddleware; ClientSessionId is an optional correlation key for idempotency/reconnect only, never the database primary identity.</summary>
+public sealed record StartTranslationSessionRequest(string DeviceId, string? ClientSessionId, string? Direction);
 
 /// <summary>Exposed for VTTranslate.Backend.Tests' WebApplicationFactory-based integration tests (health, placeholder, and authentication/authorization boundary tests).</summary>
 public partial class Program;

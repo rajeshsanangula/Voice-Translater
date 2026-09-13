@@ -234,3 +234,36 @@ public sealed class ProviderAccessGrantConfiguration : IEntityTypeConfiguration<
         b.HasOne<Device>().WithMany().HasForeignKey(g => g.DeviceId).OnDelete(DeleteBehavior.Cascade);
     }
 }
+
+public sealed class TranslationSessionConfiguration : IEntityTypeConfiguration<TranslationSession>
+{
+    public void Configure(EntityTypeBuilder<TranslationSession> b)
+    {
+        b.ToTable("translation_sessions");
+        b.HasKey(s => s.Id);
+        b.Property(s => s.State).HasConversion<string>().HasMaxLength(20);
+        b.Property(s => s.ClientSessionId).HasMaxLength(200);
+        b.Property(s => s.Direction).HasMaxLength(50);
+
+        b.HasIndex(s => s.AccountId).HasDatabaseName("ix_translation_sessions_account");
+
+        // The entire idempotency/reconnect-safety mechanism (Phase 6.9 §11/§15): at most
+        // one ACTIVE session per (AccountId, ClientSessionId) — enforced at the database
+        // level, not only in application code — while still allowing a brand-new session
+        // to be created with the same ClientSessionId once the prior one is terminal
+        // (Ended/Expired/Aborted), which is exactly what "reconnect after expiry creates
+        // a genuinely new session" requires.
+        b.HasIndex(s => new { s.AccountId, s.ClientSessionId })
+            .IsUnique()
+            .HasFilter("\"State\" = 'Active' AND \"ClientSessionId\" IS NOT NULL")
+            .HasDatabaseName("ix_translation_sessions_account_client_active_unique");
+
+        b.HasOne<Account>().WithMany().HasForeignKey(s => s.AccountId).OnDelete(DeleteBehavior.Cascade);
+        b.HasOne<Device>().WithMany().HasForeignKey(s => s.DeviceId).OnDelete(DeleteBehavior.Restrict);
+
+        // Optimistic concurrency (Phase 6.9 §22/§23) — protects heartbeat/end/expiry
+        // races: a losing concurrent writer's transaction fails and must re-read, never
+        // silently overwrite a terminal state that a winning writer already committed.
+        b.Property<uint>("xmin").IsRowVersion();
+    }
+}

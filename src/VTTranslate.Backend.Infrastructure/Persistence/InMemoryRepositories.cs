@@ -33,6 +33,10 @@ public sealed class InMemoryAccountRepository : IAccountRepository
     /// tests have no real concurrent-transaction race to protect against.</summary>
     public Task LockAccountForDeviceRegistrationAsync(Guid accountId, CancellationToken ct) =>
         Task.CompletedTask;
+
+    /// <summary>No-op — see the interface's own doc comment (Phase 6.9).</summary>
+    public Task LockAccountForUsageAccountingAsync(Guid accountId, CancellationToken ct) =>
+        Task.CompletedTask;
 }
 
 public sealed class InMemoryDeviceRepository : IDeviceRepository
@@ -178,6 +182,34 @@ public sealed class InMemoryProviderAccessRepository : IProviderAccessRepository
 
     /// <summary>Test-only accessor — not part of the <see cref="IProviderAccessRepository"/> contract.</summary>
     public IReadOnlyList<ProviderAccessGrant> Grants => _grants.ToList();
+}
+
+public sealed class InMemoryTranslationSessionRepository : ITranslationSessionRepository
+{
+    private readonly ConcurrentDictionary<Guid, TranslationSession> _byId = new();
+
+    public Task<TranslationSession?> FindByIdAsync(Guid sessionId, CancellationToken ct) =>
+        Task.FromResult(_byId.GetValueOrDefault(sessionId));
+
+    public Task<TranslationSession?> FindActiveByClientSessionIdAsync(Guid accountId, string clientSessionId, CancellationToken ct) =>
+        Task.FromResult(_byId.Values.FirstOrDefault(s =>
+            s.AccountId == accountId && s.ClientSessionId == clientSessionId && s.State == TranslationSessionState.Active));
+
+    public Task SaveAsync(TranslationSession session, CancellationToken ct)
+    {
+        // Mirrors the partial unique index enforced at the database layer (Phase 6.9) —
+        // at most one ACTIVE session per (AccountId, ClientSessionId), even though many
+        // terminal historical rows may share the same clientSessionId.
+        if (session.State == TranslationSessionState.Active && session.ClientSessionId is not null &&
+            _byId.Values.Any(s => s.Id != session.Id && s.AccountId == session.AccountId &&
+                                   s.ClientSessionId == session.ClientSessionId && s.State == TranslationSessionState.Active))
+        {
+            throw new ActiveSessionAlreadyExistsException(session.AccountId, session.ClientSessionId);
+        }
+
+        _byId[session.Id] = session;
+        return Task.CompletedTask;
+    }
 }
 
 public sealed class InMemoryBillingEventRepository : IBillingEventRepository

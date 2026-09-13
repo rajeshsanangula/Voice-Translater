@@ -43,6 +43,12 @@ public sealed class EfAccountRepository(AutraxisDbContext db) : IAccountReposito
     // IUnitOfWork transaction; the lock is held until that transaction commits/rolls back.
     public Task LockAccountForDeviceRegistrationAsync(Guid accountId, CancellationToken ct) =>
         db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM accounts WHERE \"Id\" = {accountId} FOR UPDATE", ct);
+
+    // Phase 6.9 — same FOR UPDATE row-lock mechanism, named separately per the interface's
+    // own doc comment (protects a different invariant at a different call site; frozen
+    // Phase 6.7 code/tests remain untouched).
+    public Task LockAccountForUsageAccountingAsync(Guid accountId, CancellationToken ct) =>
+        db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM accounts WHERE \"Id\" = {accountId} FOR UPDATE", ct);
 }
 
 public sealed class EfProfileRepository(AutraxisDbContext db) : IProfileRepository
@@ -184,6 +190,38 @@ public sealed class EfProviderAccessRepository(AutraxisDbContext db) : IProvider
     {
         db.ProviderAccessGrants.Add(grant);
         await db.SaveChangesAsync(ct);
+    }
+}
+
+public sealed class EfTranslationSessionRepository(AutraxisDbContext db) : ITranslationSessionRepository
+{
+    private const string UniqueViolationSqlState = "23505";
+
+    public Task<TranslationSession?> FindByIdAsync(Guid sessionId, CancellationToken ct) =>
+        db.TranslationSessions.FirstOrDefaultAsync(s => s.Id == sessionId, ct);
+
+    public Task<TranslationSession?> FindActiveByClientSessionIdAsync(Guid accountId, string clientSessionId, CancellationToken ct) =>
+        db.TranslationSessions.FirstOrDefaultAsync(s =>
+            s.AccountId == accountId && s.ClientSessionId == clientSessionId && s.State == Domain.Enums.TranslationSessionState.Active, ct);
+
+    public async Task SaveAsync(TranslationSession session, CancellationToken ct)
+    {
+        var existing = await db.TranslationSessions.FirstOrDefaultAsync(s => s.Id == session.Id, ct);
+        if (existing is null) db.TranslationSessions.Add(session);
+        else db.Entry(existing).CurrentValues.SetValues(session);
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: UniqueViolationSqlState })
+        {
+            throw new Domain.Abstractions.ActiveSessionAlreadyExistsException(session.AccountId, session.ClientSessionId ?? "");
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new Domain.ConcurrentUpdateException(session.Id);
+        }
     }
 }
 

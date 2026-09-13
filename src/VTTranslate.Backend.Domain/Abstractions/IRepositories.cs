@@ -28,6 +28,17 @@ public interface IAccountRepository
     /// only, no real concurrent-write race exists there to protect against).
     /// </summary>
     Task LockAccountForDeviceRegistrationAsync(Guid accountId, CancellationToken ct);
+
+    /// <summary>
+    /// Phase 6.9 — the same exclusive-row-lock mechanism as
+    /// <see cref="LockAccountForDeviceRegistrationAsync"/>, under its own name because it
+    /// protects a different invariant (concurrent translation-session admission never
+    /// exceeding the authoritative usage limit — see
+    /// docs/phase-6.9-usage-metering-and-session-accounting.md §21) at a different call
+    /// site. Deliberately NOT unified with the Phase 6.7 method so that frozen Phase 6.7
+    /// code and tests remain completely untouched by this phase.
+    /// </summary>
+    Task LockAccountForUsageAccountingAsync(Guid accountId, CancellationToken ct);
 }
 
 public interface IDeviceRepository
@@ -145,6 +156,29 @@ public interface IProviderCredentialIssuer
     /// configured — never fabricates a credential, never falls back to a long-lived one.
     /// </summary>
     Task<IssuedProviderCredential?> IssueAsync(ProviderCapability capability, TimeSpan lifetime, CancellationToken ct);
+}
+
+/// <summary>
+/// Phase 6.9 — persistence port for <see cref="TranslationSession"/>. Session lookups by
+/// ID are always subsequently filtered by the caller's own AccountId (account isolation
+/// is enforced by the Application layer, not by this port alone — mirrors every other
+/// repository in this codebase).
+/// </summary>
+public interface ITranslationSessionRepository
+{
+    Task<TranslationSession?> FindByIdAsync(Guid sessionId, CancellationToken ct);
+
+    /// <summary>Finds the currently-ACTIVE session (if any) for this (account, clientSessionId) pair — used for idempotent start/reconnect matching. Never returns a terminal session (there may be many historical terminal rows sharing the same clientSessionId once a prior session ended/expired — see the partial unique index, EF configuration).</summary>
+    Task<TranslationSession?> FindActiveByClientSessionIdAsync(Guid accountId, string clientSessionId, CancellationToken ct);
+
+    Task SaveAsync(TranslationSession session, CancellationToken ct);
+}
+
+/// <summary>Phase 6.9 — thrown when a concurrent start attempt races past the application-level idempotency check and collides with the database's own partial unique index (AccountId, ClientSessionId) WHERE State = Active. Translated from the database's own constraint violation at the Infrastructure boundary, exactly like the existing DuplicateBillingEventException/ConcurrentUpdateException pattern.</summary>
+public sealed class ActiveSessionAlreadyExistsException(Guid accountId, string clientSessionId) : Exception($"Account '{accountId}' already has an active session for clientSessionId '{clientSessionId}'.")
+{
+    public Guid AccountId { get; } = accountId;
+    public string ClientSessionId { get; } = clientSessionId;
 }
 
 /// <summary>The ONLY shape a provider-access caller ever sees — a genuinely short-lived, provider-scoped credential, never the backend's own master key.</summary>

@@ -80,6 +80,29 @@ public class ConfigurationSecretSafetyTests
     }
 
     /// <summary>
+    /// Phase 6.9: "TranslationSessions" carries only "LeaseSeconds" — non-secret, bounded
+    /// to a sane range so a committed value can never accidentally configure an
+    /// effectively-unlimited or nonsensical session lease.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ConfigFiles))]
+    public void ConfigFile_TranslationSessionsSection_LeaseIsSaneAndBounded(string path)
+    {
+        var content = File.ReadAllText(path);
+        using var doc = System.Text.Json.JsonDocument.Parse(content);
+
+        if (!doc.RootElement.TryGetProperty("TranslationSessions", out var section)) return;
+
+        var allowedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_comment", "LeaseSeconds" };
+        foreach (var property in section.EnumerateObject())
+        {
+            Assert.Contains(property.Name, allowedKeys);
+            if (property.Name == "LeaseSeconds")
+                Assert.InRange(property.Value.GetInt32(), 1, 3600);
+        }
+    }
+
+    /// <summary>
     /// Phase 6.8: "ProviderAccess" carries only "CredentialLifetimeSeconds" — non-secret,
     /// so no empty-value requirement, but bounded to a sane range so a committed value
     /// can never accidentally configure an effectively-unlimited or nonsensical lifetime.
