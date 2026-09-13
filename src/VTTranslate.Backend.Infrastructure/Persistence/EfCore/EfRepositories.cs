@@ -35,6 +35,14 @@ public sealed class EfAccountRepository(AutraxisDbContext db) : IAccountReposito
         else db.Entry(existing).CurrentValues.SetValues(account);
         await db.SaveChangesAsync(ct);
     }
+
+    // Phase 6.7 — real PostgreSQL row lock (SELECT ... FOR UPDATE), closing the
+    // check-then-act device-registration race (docs/phase-6.7-device-licensing-policy.md
+    // §6). Executed via ExecuteSqlInterpolatedAsync rather than a materializing query —
+    // only the lock's side effect is needed, not the row's data. Must be called inside an
+    // IUnitOfWork transaction; the lock is held until that transaction commits/rolls back.
+    public Task LockAccountForDeviceRegistrationAsync(Guid accountId, CancellationToken ct) =>
+        db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM accounts WHERE \"Id\" = {accountId} FOR UPDATE", ct);
 }
 
 public sealed class EfProfileRepository(AutraxisDbContext db) : IProfileRepository

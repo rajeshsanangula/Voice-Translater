@@ -28,6 +28,11 @@ public sealed class InMemoryAccountRepository : IAccountRepository
         _byId[account.Id] = account;
         return Task.CompletedTask;
     }
+
+    /// <summary>No-op — see the interface's own doc comment. Single-process in-memory
+    /// tests have no real concurrent-transaction race to protect against.</summary>
+    public Task LockAccountForDeviceRegistrationAsync(Guid accountId, CancellationToken ct) =>
+        Task.CompletedTask;
 }
 
 public sealed class InMemoryDeviceRepository : IDeviceRepository

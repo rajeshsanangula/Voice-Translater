@@ -11,12 +11,15 @@ public class DeviceRegistrationServiceTests
     private readonly InMemoryDeviceRepository _devices = new();
     private readonly InMemorySubscriptionRepository _subscriptions = new();
     private readonly InMemoryPlanRepository _plans = new();
+    private readonly InMemoryAccountRepository _accounts = new();
+    private readonly InMemoryUnitOfWork _unitOfWork = new();
+    private readonly InMemoryAuditEventRepository _audit = new();
     private readonly FakeClock _clock = new();
     private readonly DeviceRegistrationService _service;
 
     public DeviceRegistrationServiceTests()
     {
-        _service = new DeviceRegistrationService(_devices, _subscriptions, _plans, _clock);
+        _service = new DeviceRegistrationService(_devices, _subscriptions, _plans, _accounts, _unitOfWork, _audit, _clock);
     }
 
     private async Task<Guid> SeedAccountWithPlanAsync(int maxActiveDevices)
@@ -127,5 +130,74 @@ public class DeviceRegistrationServiceTests
         // The conservative single-device default must still be enforced, not treated as unlimited.
         await Assert.ThrowsAsync<DeviceLimitExceededException>(() =>
             _service.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "Second", CancellationToken.None));
+    }
+
+    // ---- Phase 6.7: 0/negative MaxActiveDevices (docs/phase-6.7-device-licensing-policy.md §3.3) ----
+
+    [Fact]
+    public async Task MaxActiveDevices_Zero_DeniesEveryRegistration()
+    {
+        var accountId = await SeedAccountWithPlanAsync(maxActiveDevices: 0);
+
+        var ex = await Assert.ThrowsAsync<DeviceLimitExceededException>(() =>
+            _service.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "First", CancellationToken.None));
+        Assert.Equal(0, ex.Limit);
+    }
+
+    [Fact]
+    public async Task MaxActiveDevices_Negative_ClampsToConservativeSingleDeviceDefault_NotTrustedAsIs()
+    {
+        var accountId = await SeedAccountWithPlanAsync(maxActiveDevices: -5);
+
+        // Clamped to 1, not -5 — the first registration succeeds (1 allowed), the second is denied.
+        var first = await _service.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "First", CancellationToken.None);
+        Assert.Equal(DeviceStatus.Authorized, first.Status);
+
+        var ex = await Assert.ThrowsAsync<DeviceLimitExceededException>(() =>
+            _service.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "Second", CancellationToken.None));
+        Assert.Equal(1, ex.Limit);
+    }
+
+    // ---- Phase 6.7: Pending is reserved/unused (docs/phase-6.7-device-licensing-policy.md §2) ----
+
+    [Fact]
+    public async Task RegisterDevice_NeverProducesPendingStatus()
+    {
+        var accountId = await SeedAccountWithPlanAsync(maxActiveDevices: 2);
+
+        var device = await _service.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "PC", CancellationToken.None);
+
+        Assert.NotEqual(DeviceStatus.Pending, device.Status);
+        Assert.Equal(DeviceStatus.Authorized, device.Status);
+    }
+
+    // ---- Phase 6.7: pooled (Model A) — one limit across all platforms ----
+
+    [Fact]
+    public async Task PooledLimit_CountsAllPlatformsTogether_NotPerPlatform()
+    {
+        var accountId = await SeedAccountWithPlanAsync(maxActiveDevices: 3);
+
+        await _service.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "PC", CancellationToken.None);
+        await _service.RegisterDeviceAsync(accountId, DevicePlatform.Android, "Phone", CancellationToken.None);
+        await _service.RegisterDeviceAsync(accountId, DevicePlatform.iOS, "Tablet", CancellationToken.None);
+
+        // The pool is now exhausted (3/3) regardless of platform mix — a 4th of ANY platform must be denied.
+        await Assert.ThrowsAsync<DeviceLimitExceededException>(() =>
+            _service.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "Second PC", CancellationToken.None));
+    }
+
+    // ---- Phase 6.7: auditability ----
+
+    [Fact]
+    public async Task RegisterAndRevoke_EachProduceTheirOwnAuditEvent()
+    {
+        var accountId = await SeedAccountWithPlanAsync(maxActiveDevices: 2);
+
+        var device = await _service.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "PC", CancellationToken.None);
+        await _service.RevokeDeviceAsync(accountId, device.Id, CancellationToken.None);
+
+        Assert.Contains(_audit.Events, e => e.EventType == "DeviceRegistered" && e.AccountId == accountId);
+        Assert.Contains(_audit.Events, e => e.EventType == "DeviceRevoked" && e.AccountId == accountId);
     }
 }

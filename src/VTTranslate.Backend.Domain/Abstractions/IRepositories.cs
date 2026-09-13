@@ -15,6 +15,18 @@ public interface IAccountRepository
     Task<Account?> FindByIdAsync(Guid accountId, CancellationToken ct);
     Task<Account?> FindByExternalIdentityAsync(string provider, string externalSubjectId, CancellationToken ct);
     Task SaveAsync(Account account, CancellationToken ct);
+
+    /// <summary>
+    /// Phase 6.7 — acquires an exclusive, transaction-scoped lock on this account's row,
+    /// used ONLY to serialize concurrent device-registration attempts for the same
+    /// account (see docs/phase-6.7-device-licensing-policy.md §6). Must be called inside
+    /// an <see cref="IUnitOfWork"/> transaction; the lock is released automatically when
+    /// that transaction commits or rolls back. Does not read or return any account data
+    /// — callers that need the account itself still call <see cref="FindByIdAsync"/>
+    /// separately. The in-memory implementation is a no-op (single-process test/dev
+    /// only, no real concurrent-write race exists there to protect against).
+    /// </summary>
+    Task LockAccountForDeviceRegistrationAsync(Guid accountId, CancellationToken ct);
 }
 
 public interface IDeviceRepository

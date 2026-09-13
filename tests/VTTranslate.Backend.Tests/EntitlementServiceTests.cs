@@ -13,6 +13,9 @@ public class EntitlementServiceTests
     private readonly InMemorySubscriptionRepository _subscriptions = new();
     private readonly InMemoryPlanRepository _plans = new();
     private readonly InMemoryUsageRecordRepository _usageRecords = new();
+    private readonly InMemoryAccountRepository _accounts = new();
+    private readonly InMemoryUnitOfWork _unitOfWork = new();
+    private readonly InMemoryAuditEventRepository _audit = new();
     private readonly FakeClock _clock = new();
     private readonly DeviceRegistrationService _deviceService;
     private readonly UsageService _usageService;
@@ -20,7 +23,7 @@ public class EntitlementServiceTests
 
     public EntitlementServiceTests()
     {
-        _deviceService = new DeviceRegistrationService(_devices, _subscriptions, _plans, _clock);
+        _deviceService = new DeviceRegistrationService(_devices, _subscriptions, _plans, _accounts, _unitOfWork, _audit, _clock);
         _usageService = new UsageService(_usageRecords, _clock);
         _service = new EntitlementService(_subscriptions, _plans, _deviceService, _usageService, _clock);
     }

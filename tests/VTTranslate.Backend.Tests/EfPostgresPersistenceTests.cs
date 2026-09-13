@@ -1,9 +1,11 @@
 using Microsoft.EntityFrameworkCore;
 using Testcontainers.PostgreSql;
+using VTTranslate.Backend.Application.Devices;
 using VTTranslate.Backend.Domain;
 using VTTranslate.Backend.Domain.Entities;
 using VTTranslate.Backend.Domain.Enums;
 using VTTranslate.Backend.Infrastructure.Persistence.EfCore;
+using VTTranslate.Backend.Infrastructure.Time;
 
 namespace VTTranslate.Backend.Tests;
 
@@ -601,6 +603,63 @@ public sealed class EfPostgresPersistenceTests(PostgresFixture fixture) : IClass
 
         Assert.Equal(SubscriptionStatus.Active, reloadedSubscription.Status); // unchanged — rolled back
         Assert.Equal(BillingEventProcessingStatus.Received, reloadedEvent.ProcessingStatus); // unchanged — rolled back, NOT Failed
+    }
+
+    // ---- Phase 6.7: real PostgreSQL device-registration concurrency ----
+
+    [SkipIfNoDockerFact]
+    public async Task ConcurrentDeviceRegistration_NeverExceedsPooledLimit_RealPostgresLock()
+    {
+        const int maxActiveDevices = 3;
+        const int concurrentAttempts = 10;
+
+        var account = NewAccount($"acct-device-race-{Guid.NewGuid()}");
+        var plan = new Plan { Id = Guid.NewGuid(), Name = "Device Race Plan", IsPubliclyPurchasable = true };
+        var entitlement = new Entitlement { Id = Guid.NewGuid(), PlanId = plan.Id, Key = EntitlementKeys.MaxActiveDevices, Value = maxActiveDevices.ToString() };
+        var subscription = new Subscription
+        {
+            Id = Guid.NewGuid(), AccountId = account.Id, PlanId = plan.Id, Status = SubscriptionStatus.Active,
+            CurrentPeriodStart = DateTimeOffset.UtcNow.AddDays(-1), CurrentPeriodEnd = DateTimeOffset.UtcNow.AddDays(30),
+            CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow,
+        };
+
+        await using (var seedDb = fixture.CreateContext())
+        {
+            seedDb.Accounts.Add(account);
+            seedDb.Plans.Add(plan);
+            seedDb.Entitlements.Add(entitlement);
+            seedDb.Subscriptions.Add(subscription);
+            await seedDb.SaveChangesAsync();
+        }
+
+        // Each concurrent "caller" gets its OWN DbContext/connection — a single shared
+        // DbContext is not safe for parallel use and would not exercise the real
+        // multi-connection race this test exists to prove is closed.
+        var tasks = Enumerable.Range(0, concurrentAttempts).Select(async _ =>
+        {
+            await using var db = fixture.CreateContext();
+            var service = new DeviceRegistrationService(
+                new EfDeviceRepository(db), new EfSubscriptionRepository(db), new EfPlanRepository(db),
+                new EfAccountRepository(db), new EfUnitOfWork(db), new EfAuditEventRepository(db), new SystemClock());
+            try
+            {
+                await service.RegisterDeviceAsync(account.Id, DevicePlatform.Windows, "Concurrent", CancellationToken.None);
+                return true;
+            }
+            catch (DeviceLimitExceededException)
+            {
+                return false;
+            }
+        });
+
+        var results = await Task.WhenAll(tasks);
+
+        Assert.Equal(maxActiveDevices, results.Count(r => r)); // exactly the limit succeeded, never more
+        Assert.Equal(concurrentAttempts - maxActiveDevices, results.Count(r => !r));
+
+        await using var readDb = fixture.CreateContext();
+        var actualDeviceCount = await readDb.Devices.CountAsync(d => d.AccountId == account.Id && d.Status != DeviceStatus.Revoked);
+        Assert.Equal(maxActiveDevices, actualDeviceCount); // the invariant, verified against real committed data
     }
 
     [SkipIfNoDockerFact]

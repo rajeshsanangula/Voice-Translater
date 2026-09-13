@@ -7,6 +7,7 @@ using VTTranslate.Backend.Application.Devices;
 using VTTranslate.Backend.Application.Entitlements;
 using VTTranslate.Backend.Application.Identity;
 using VTTranslate.Backend.Application.Usage;
+using VTTranslate.Backend.Domain;
 using VTTranslate.Backend.Domain.Abstractions;
 using VTTranslate.Backend.Domain.Entities;
 using VTTranslate.Backend.Domain.Enums;
@@ -238,7 +239,73 @@ app.UseAuthorization();
 // 6.3) — Phase 6.4 adds ONLY the authentication/authorization boundary in front of
 // them; no placeholder becomes real functionality in this phase.
 NotImplementedPlaceholder(app, "/account").RequireAuthorization();
-NotImplementedPlaceholder(app, "/devices").RequireAuthorization();
+
+// ---- Phase 6.7: real customer device endpoints ----
+// Account derived exclusively from AccountResolutionMiddleware's resolved Account — never
+// from a route parameter, request body, or query string. See
+// docs/phase-6.7-device-licensing-policy.md §4/§5.
+
+app.MapGet("/devices", async (HttpContext ctx, IDeviceRegistrationService deviceService) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var devices = await deviceService.ListDevicesAsync(account.Id, ctx.RequestAborted);
+    return Results.Ok(devices.Select(d => new
+    {
+        id = d.Id,
+        platform = d.Platform.ToString(),
+        displayName = d.DisplayName,
+        status = d.Status.ToString(),
+        registeredAt = d.RegisteredAt,
+        lastSeenAt = d.LastSeenAt,
+        revokedAt = d.RevokedAt,
+    }));
+}).RequireAuthorization();
+
+app.MapPost("/devices", async (HttpContext ctx, RegisterDeviceRequest request, IDeviceRegistrationService deviceService) =>
+{
+    if (!Enum.TryParse<DevicePlatform>(request.Platform, ignoreCase: true, out var platform))
+        return Results.BadRequest(new { status = "invalid_platform" });
+    if (request.DisplayName is { Length: > 200 })
+        return Results.BadRequest(new { status = "display_name_too_long" });
+
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    try
+    {
+        var device = await deviceService.RegisterDeviceAsync(account.Id, platform, request.DisplayName, ctx.RequestAborted);
+        return Results.Json(new
+        {
+            id = device.Id,
+            platform = device.Platform.ToString(),
+            displayName = device.DisplayName,
+            status = device.Status.ToString(),
+            registeredAt = device.RegisteredAt,
+        }, statusCode: StatusCodes.Status201Created);
+    }
+    catch (DeviceLimitExceededException)
+    {
+        return Results.Json(new { status = "device_limit_exceeded" }, statusCode: StatusCodes.Status403Forbidden);
+    }
+}).RequireAuthorization();
+
+app.MapPost("/devices/{id:guid}/revoke", async (HttpContext ctx, Guid id, IDeviceRegistrationService deviceService) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    try
+    {
+        await deviceService.RevokeDeviceAsync(account.Id, id, ctx.RequestAborted);
+    }
+    catch (DeviceNotOwnedException)
+    {
+        // Same response whether the device doesn't exist at all or belongs to another
+        // account — never lets a caller distinguish the two and enumerate device IDs
+        // belonging to other accounts (docs/phase-6.7-device-licensing-policy.md §5).
+        return Results.NotFound(new { status = "device_not_found" });
+    }
+
+    var devices = await deviceService.ListDevicesAsync(account.Id, ctx.RequestAborted);
+    var revoked = devices.First(d => d.Id == id);
+    return Results.Ok(new { id, status = revoked.Status.ToString(), revokedAt = revoked.RevokedAt });
+}).RequireAuthorization();
 NotImplementedPlaceholder(app, "/subscription").RequireAuthorization();
 // ---- Phase 6.6: real customer subscription/entitlement/usage endpoints ----
 // All four derive the account exclusively from AccountResolutionMiddleware's resolved
@@ -337,6 +404,9 @@ static RouteHandlerBuilder NotImplementedPlaceholder(WebApplication app, string 
 
 /// <summary>Phase 6.6: request body for POST /subscription/cancel. Deliberately carries no account/status/plan value — the account is always derived from AccountResolutionMiddleware, never from the request.</summary>
 public sealed record CancelSubscriptionRequest(bool Immediate);
+
+/// <summary>Phase 6.7: request body for POST /devices. Deliberately carries no account ID or device ID — the account comes from AccountResolutionMiddleware, and the device ID is always server-generated (Guid.NewGuid()), never client-supplied.</summary>
+public sealed record RegisterDeviceRequest(string Platform, string? DisplayName);
 
 /// <summary>Exposed for VTTranslate.Backend.Tests' WebApplicationFactory-based integration tests (health, placeholder, and authentication/authorization boundary tests).</summary>
 public partial class Program;
