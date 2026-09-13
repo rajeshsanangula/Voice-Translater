@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- Multi-resolution icon (16/24/32/48/64/128/256px), generated losslessly from the
+         official Assets/Branding/autraxis-icon.png (resized + centered only, never
+         redrawn/recolored) — see Assets/Branding/README.md. -->
+    <ApplicationIcon>Assets\Branding\app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VTTranslate.Core\VTTranslate.Core.csproj" />
+  </ItemGroup>
+
+  <!--
+    AUTRAXIS SYSTEMS INC. brand assets — copied to the output directory as loose files
+    (not embedded WPF Resources) so BrandAssets.cs can gracefully detect their absence at
+    runtime instead of failing the build when the real PNGs haven't been dropped in yet.
+    See Assets/Branding/README.md for the exact filenames expected.
+  -->
+  <ItemGroup>
+    <None Include="Assets\Branding\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+
+</Project>

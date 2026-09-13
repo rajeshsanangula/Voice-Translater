@@ -1,0 +1,314 @@
+<Window x:Class="VTTranslate.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:VTTranslate.App"
+        mc:Ignorable="d"
+        Title="Voice-Translater — AUTRAXIS SYSTEMS INC." Height="720" Width="1080" MinHeight="560" MinWidth="820"
+        Style="{StaticResource BrandWindowStyle}"
+        Closing="Window_Closing">
+
+    <Window.Resources>
+        <!-- Status-pill styling driven entirely by the existing, real StatusKind — no new state is invented. -->
+        <Style x:Key="StatusPillBorder" TargetType="Border">
+            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="Padding" Value="10,4" />
+            <Setter Property="Background" Value="#EEF1F6" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Running">
+                    <Setter Property="Background" Value="#E4F7EE" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Starting">
+                    <Setter Property="Background" Value="#FDF3DC" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Muted">
+                    <Setter Property="Background" Value="#FDEDEC" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Reconnecting">
+                    <Setter Property="Background" Value="#FDF3DC" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Error">
+                    <Setter Property="Background" Value="#FDEDEC" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="ConfigurationError">
+                    <Setter Property="Background" Value="#FDEDEC" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="StatusPillDot" TargetType="Ellipse">
+            <Setter Property="Width" Value="8" />
+            <Setter Property="Height" Value="8" />
+            <Setter Property="Fill" Value="{StaticResource StatusMutedBrush}" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Running">
+                    <Setter Property="Fill" Value="{StaticResource StatusGoodBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Starting">
+                    <Setter Property="Fill" Value="{StaticResource StatusWarnBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Muted">
+                    <Setter Property="Fill" Value="{StaticResource StatusErrorBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Reconnecting">
+                    <Setter Property="Fill" Value="{StaticResource StatusWarnBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="Error">
+                    <Setter Property="Fill" Value="{StaticResource StatusErrorBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="ConfigurationError">
+                    <Setter Property="Fill" Value="{StaticResource StatusErrorBrush}" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="StatusPillText" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{StaticResource BrandNavySoftBrush}" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+        </Style>
+    </Window.Resources>
+
+    <Grid Background="{StaticResource BrandBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- ============ Header: brand + live status ============ -->
+        <Border Grid.Row="0" Background="{StaticResource BrandSurfaceBrush}" BorderBrush="{StaticResource BrandBorderBrush}"
+                BorderThickness="0,0,0,1" Padding="20,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Image x:Name="HeaderLogoImage" Height="34" Stretch="Uniform" Margin="0,0,10,0" />
+                    <StackPanel x:Name="HeaderFallbackWordmark" VerticalAlignment="Center">
+                        <TextBlock Text="AUTRAXIS" FontSize="16" FontWeight="Bold" Foreground="{StaticResource BrandNavyBrush}" />
+                        <TextBlock Text="SYSTEMS INC." FontSize="9" Foreground="{StaticResource BrandGraySubtleBrush}" Margin="0,-2,0,0" />
+                    </StackPanel>
+                    <Border Width="1" Background="{StaticResource BrandBorderBrush}" Margin="14,2" />
+                    <TextBlock Text="Voice-Translater" VerticalAlignment="Center" FontSize="14"
+                               Foreground="{StaticResource BrandNavySoftBrush}" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,14,0">
+                    <Border Style="{StaticResource StatusPillBorder}">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Style="{StaticResource StatusPillDot}" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding Status}" Style="{StaticResource StatusPillText}" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <Button Grid.Column="3" Content="About" Style="{StaticResource SecondaryButton}"
+                        Padding="12,6" Click="About_Click" />
+            </Grid>
+        </Border>
+
+        <!-- ============ Body ============ -->
+        <Grid Grid.Row="1" Margin="20">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="380" />
+                <ColumnDefinition Width="16" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel>
+
+                    <!-- Session controls -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Session" Style="{StaticResource SectionHeaderText}" />
+
+                            <!-- The pipeline always translates both directions simultaneously —
+                                 this is not a switchable mode, so both directions are shown as
+                                 parallel, always-on channels rather than a single toggle. -->
+                            <UniformGrid Columns="2" Margin="0,0,0,12">
+                                <Border Background="{StaticResource BrandBackgroundBrush}" CornerRadius="4" Padding="10,8" Margin="0,0,6,0">
+                                    <StackPanel HorizontalAlignment="Center">
+                                        <TextBlock Text="ENGLISH → GERMAN" FontSize="10" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource BrandGraySubtleBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Microphone" FontSize="11" HorizontalAlignment="Center"
+                                                   Foreground="{StaticResource BrandNavySoftBrush}" Margin="0,2,0,0" />
+                                    </StackPanel>
+                                </Border>
+                                <Border Background="{StaticResource BrandBackgroundBrush}" CornerRadius="4" Padding="10,8" Margin="6,0,0,0">
+                                    <StackPanel HorizontalAlignment="Center">
+                                        <TextBlock Text="GERMAN → ENGLISH" FontSize="10" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource BrandGraySubtleBrush}" HorizontalAlignment="Center" />
+                                        <TextBlock Text="Remote / system audio" FontSize="11" HorizontalAlignment="Center"
+                                                   Foreground="{StaticResource BrandNavySoftBrush}" Margin="0,2,0,0" />
+                                    </StackPanel>
+                                </Border>
+                            </UniformGrid>
+
+                            <StackPanel Orientation="Horizontal">
+                                <Button Content="Start" Command="{Binding StartCommand}" Style="{StaticResource PrimaryButton}" Margin="0,0,8,0" MinWidth="90" />
+                                <Button Content="Stop" Command="{Binding StopCommand}" Style="{StaticResource SecondaryButton}" MinWidth="90" />
+                            </StackPanel>
+
+                            <Button Command="{Binding ToggleMuteCommand}" Margin="0,10,0,0" HorizontalAlignment="Stretch"
+                                    Style="{StaticResource MuteButtonStyle}">
+                                <TextBlock>
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Text" Value="🎤  Mute microphone" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsMicrophoneMuted}" Value="True">
+                                                    <Setter Property="Text" Value="🔇  Microphone muted — click to unmute" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Button>
+
+                            <TextBlock Text="{Binding ReconnectStatus}" Style="{StaticResource HintText}" Margin="0,10,0,0"
+                                       Visibility="{Binding ReconnectStatus, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
+                            <TextBlock Text="{Binding ConfigWarnings}" Foreground="{StaticResource StatusWarnBrush}" TextWrapping="Wrap" Margin="0,6,0,0"
+                                       Visibility="{Binding ConfigWarnings, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
+                            <TextBlock Text="{Binding LastError}" Foreground="{StaticResource StatusErrorBrush}" TextWrapping="Wrap" Margin="0,6,0,0" FontWeight="SemiBold"
+                                       Visibility="{Binding LastError, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Azure provider status -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Azure Speech Provider" Style="{StaticResource SectionHeaderText}" />
+                            <TextBlock Text="{Binding AzureConfigStatus}" TextWrapping="Wrap" Foreground="{StaticResource BrandNavySoftBrush}" FontSize="12" />
+                            <TextBlock Style="{StaticResource HintText}" Margin="0,8,0,0"
+                                       Text="Set via the AZURE_SPEECH_KEY and AZURE_SPEECH_REGION environment variables (never entered or stored in this app), then restart." />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Device configuration -->
+                    <Border Style="{StaticResource CardBorder}">
+                        <StackPanel>
+                            <TextBlock Text="Audio Devices" Style="{StaticResource SectionHeaderText}" />
+
+                            <TextBlock Text="Microphone" Style="{StaticResource FieldLabelText}" />
+                            <TextBlock Text="Captures your spoken English." Style="{StaticResource HintText}" Margin="0,0,0,3" />
+                            <ComboBox ItemsSource="{Binding InputDevices}" SelectedItem="{Binding SelectedMicrophone}"
+                                      ToolTip="The input device Voice-Translater listens to for your English speech.">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Name}" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <TextBlock Text="Remote / System Audio" Style="{StaticResource FieldLabelText}" />
+                            <TextBlock Text="Loopback source carrying the other participant's German speech." Style="{StaticResource HintText}" Margin="0,0,0,3" />
+                            <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedRemoteInput}"
+                                      ToolTip="The playback device to capture as a loopback source (e.g. the meeting app's output) for incoming German speech.">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Name}" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <TextBlock Text="English Output" Style="{StaticResource FieldLabelText}" />
+                            <TextBlock Text="Where the German→English translation is spoken to you." Style="{StaticResource HintText}" Margin="0,0,0,3" />
+                            <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedEnglishOutput}"
+                                      ToolTip="Your headphones or speakers — where you hear the English translation.">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Name}" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <TextBlock Text="German Output" Style="{StaticResource FieldLabelText}" />
+                            <TextBlock Text="Where the English→German translation is sent — typically a virtual microphone." Style="{StaticResource HintText}" Margin="0,0,0,3" />
+                            <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedGermanOutput}"
+                                      ToolTip="A virtual audio cable input (e.g. VB-CABLE) that your meeting app uses as its microphone, or a speaker.">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Name}" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <Button Content="Refresh Devices" Command="{Binding RefreshDevicesCommand}"
+                                    Style="{StaticResource SecondaryButton}" Margin="0,12,0,0" HorizontalAlignment="Left" Padding="10,5" />
+                        </StackPanel>
+                    </Border>
+
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- ============ Live translation + diagnostics ============ -->
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Style="{StaticResource CardBorder}" Margin="0,0,0,12">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top" Text="Live Translation" Style="{StaticResource SectionHeaderText}" />
+                        <ListBox ItemsSource="{Binding TranscriptLines}" BorderThickness="0" Background="Transparent"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Padding" Value="0,5" />
+                                    <Setter Property="Background" Value="Transparent" />
+                                    <Setter Property="Focusable" Value="False" />
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding}" TextWrapping="Wrap" FontFamily="Consolas" FontSize="13"
+                                               Foreground="{StaticResource BrandNavyBrush}" />
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </Border>
+
+                <!-- Diagnostics: secondary to the main translation experience, high-level only. -->
+                <Border Grid.Row="1" Style="{StaticResource CardBorder}" Margin="0">
+                    <StackPanel>
+                        <TextBlock Text="Latency" Style="{StaticResource SectionHeaderText}" Margin="0,0,0,8" />
+                        <!-- WrapPanel (not UniformGrid) so whole metric blocks reflow onto a
+                             new line at narrow widths, instead of individual labels
+                             word-wrapping mid-word ("CAPTURE→PA" / "RTIAL"). -->
+                        <WrapPanel>
+                            <StackPanel MinWidth="130" Margin="0,0,20,8">
+                                <TextBlock Text="TOTAL (P90)" Style="{StaticResource HintText}" TextWrapping="NoWrap" />
+                                <TextBlock Text="{Binding LatencyTotalText}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}" />
+                            </StackPanel>
+                            <StackPanel MinWidth="150" Margin="0,0,20,8">
+                                <TextBlock Text="CAPTURE→PARTIAL" Style="{StaticResource HintText}" TextWrapping="NoWrap" />
+                                <TextBlock Text="{Binding LatencyCaptureText}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}" />
+                            </StackPanel>
+                            <StackPanel MinWidth="150" Margin="0,0,20,8">
+                                <TextBlock Text="ASR + TRANSLATION" Style="{StaticResource HintText}" TextWrapping="NoWrap" />
+                                <TextBlock Text="{Binding LatencyAsrText}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}" />
+                            </StackPanel>
+                            <StackPanel MinWidth="100" Margin="0,0,20,8">
+                                <TextBlock Text="→ TTS" Style="{StaticResource HintText}" TextWrapping="NoWrap" />
+                                <TextBlock Text="{Binding LatencyTtsText}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}" />
+                            </StackPanel>
+                            <StackPanel MinWidth="130" Margin="0,0,0,8">
+                                <TextBlock Text="TTS → QUEUE" Style="{StaticResource HintText}" TextWrapping="NoWrap" />
+                                <TextBlock Text="{Binding LatencyQueueText}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}" />
+                            </StackPanel>
+                        </WrapPanel>
+                        <TextBlock Style="{StaticResource HintText}" Margin="0,8,0,0"
+                                   Text="Internal pipeline timing only — not the acoustic latency you perceive (mic buffering, network transit, and speaker output add further delay)." />
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,11 @@
+@VTTranslate.Backend.Api_HostAddress = http://localhost:5067
+
+GET {{VTTranslate.Backend.Api_HostAddress}}/health/live
+Accept: application/json
+
+###
+
+GET {{VTTranslate.Backend.Api_HostAddress}}/health/ready
+Accept: application/json
+
+###

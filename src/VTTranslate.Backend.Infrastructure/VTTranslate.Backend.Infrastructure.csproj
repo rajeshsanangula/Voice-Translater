@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\VTTranslate.Backend.Domain\VTTranslate.Backend.Domain.csproj" />
+    <ProjectReference Include="..\VTTranslate.Backend.Application\VTTranslate.Backend.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Phase 6.5: PostgreSQL persistence — see docs/phase-6.5-database-decision.md.
+         EF Core / Npgsql configuration lives entirely in this project (Infrastructure);
+         Domain and Application reference neither package. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.11" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.11">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

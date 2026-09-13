@@ -1,0 +1,87 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{F7E877EA-D9EF-41B8-8F1F-9C7F7235EE55}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VTTranslate.Core", "src\VTTranslate.Core\VTTranslate.Core.csproj", "{05C2A388-C995-4AA8-9B6D-C8CE1D7DD33D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VTTranslate.App", "src\VTTranslate.App\VTTranslate.App.csproj", "{52920877-5053-4034-A9C1-3871B64B7E41}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{51C689C6-12F7-4157-931D-98BD8909F7B7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VTTranslate.Core.Tests", "tests\VTTranslate.Core.Tests\VTTranslate.Core.Tests.csproj", "{85CAFC00-908C-4AA7-A610-58DFAF918F06}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{B70ACB71-83FB-463B-A8CC-65F0E019B67A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VTTranslate.LiveTest", "tools\VTTranslate.LiveTest\VTTranslate.LiveTest.csproj", "{D34744AB-7815-41B3-AE88-07A65ED6AF49}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VTTranslate.Backend.Domain", "src\VTTranslate.Backend.Domain\VTTranslate.Backend.Domain.csproj", "{AEBAEE87-36A0-4130-9DEA-BB8FF5414600}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VTTranslate.Backend.Application", "src\VTTranslate.Backend.Application\VTTranslate.Backend.Application.csproj", "{167B6FF0-44AF-466D-B15F-E5011511DA58}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VTTranslate.Backend.Infrastructure", "src\VTTranslate.Backend.Infrastructure\VTTranslate.Backend.Infrastructure.csproj", "{5371B46A-B05A-4297-A3B9-9F95A80FB677}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VTTranslate.Backend.Api", "src\VTTranslate.Backend.Api\VTTranslate.Backend.Api.csproj", "{EDEE8096-F6FB-4730-AA24-0CE00049AB56}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VTTranslate.Backend.Tests", "tests\VTTranslate.Backend.Tests\VTTranslate.Backend.Tests.csproj", "{5F931E96-0633-48FC-ADAB-5145886F4025}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{05C2A388-C995-4AA8-9B6D-C8CE1D7DD33D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{05C2A388-C995-4AA8-9B6D-C8CE1D7DD33D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{05C2A388-C995-4AA8-9B6D-C8CE1D7DD33D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{05C2A388-C995-4AA8-9B6D-C8CE1D7DD33D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{52920877-5053-4034-A9C1-3871B64B7E41}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{52920877-5053-4034-A9C1-3871B64B7E41}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{52920877-5053-4034-A9C1-3871B64B7E41}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{52920877-5053-4034-A9C1-3871B64B7E41}.Release|Any CPU.Build.0 = Release|Any CPU
+		{85CAFC00-908C-4AA7-A610-58DFAF918F06}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{85CAFC00-908C-4AA7-A610-58DFAF918F06}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{85CAFC00-908C-4AA7-A610-58DFAF918F06}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{85CAFC00-908C-4AA7-A610-58DFAF918F06}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D34744AB-7815-41B3-AE88-07A65ED6AF49}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D34744AB-7815-41B3-AE88-07A65ED6AF49}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D34744AB-7815-41B3-AE88-07A65ED6AF49}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D34744AB-7815-41B3-AE88-07A65ED6AF49}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AEBAEE87-36A0-4130-9DEA-BB8FF5414600}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AEBAEE87-36A0-4130-9DEA-BB8FF5414600}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AEBAEE87-36A0-4130-9DEA-BB8FF5414600}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AEBAEE87-36A0-4130-9DEA-BB8FF5414600}.Release|Any CPU.Build.0 = Release|Any CPU
+		{167B6FF0-44AF-466D-B15F-E5011511DA58}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{167B6FF0-44AF-466D-B15F-E5011511DA58}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{167B6FF0-44AF-466D-B15F-E5011511DA58}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{167B6FF0-44AF-466D-B15F-E5011511DA58}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5371B46A-B05A-4297-A3B9-9F95A80FB677}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5371B46A-B05A-4297-A3B9-9F95A80FB677}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5371B46A-B05A-4297-A3B9-9F95A80FB677}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5371B46A-B05A-4297-A3B9-9F95A80FB677}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EDEE8096-F6FB-4730-AA24-0CE00049AB56}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EDEE8096-F6FB-4730-AA24-0CE00049AB56}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EDEE8096-F6FB-4730-AA24-0CE00049AB56}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EDEE8096-F6FB-4730-AA24-0CE00049AB56}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5F931E96-0633-48FC-ADAB-5145886F4025}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5F931E96-0633-48FC-ADAB-5145886F4025}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5F931E96-0633-48FC-ADAB-5145886F4025}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5F931E96-0633-48FC-ADAB-5145886F4025}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{05C2A388-C995-4AA8-9B6D-C8CE1D7DD33D} = {F7E877EA-D9EF-41B8-8F1F-9C7F7235EE55}
+		{52920877-5053-4034-A9C1-3871B64B7E41} = {F7E877EA-D9EF-41B8-8F1F-9C7F7235EE55}
+		{85CAFC00-908C-4AA7-A610-58DFAF918F06} = {51C689C6-12F7-4157-931D-98BD8909F7B7}
+		{D34744AB-7815-41B3-AE88-07A65ED6AF49} = {B70ACB71-83FB-463B-A8CC-65F0E019B67A}
+		{AEBAEE87-36A0-4130-9DEA-BB8FF5414600} = {F7E877EA-D9EF-41B8-8F1F-9C7F7235EE55}
+		{167B6FF0-44AF-466D-B15F-E5011511DA58} = {F7E877EA-D9EF-41B8-8F1F-9C7F7235EE55}
+		{5371B46A-B05A-4297-A3B9-9F95A80FB677} = {F7E877EA-D9EF-41B8-8F1F-9C7F7235EE55}
+		{EDEE8096-F6FB-4730-AA24-0CE00049AB56} = {F7E877EA-D9EF-41B8-8F1F-9C7F7235EE55}
+		{5F931E96-0633-48FC-ADAB-5145886F4025} = {51C689C6-12F7-4157-931D-98BD8909F7B7}
+	EndGlobalSection
+EndGlobal

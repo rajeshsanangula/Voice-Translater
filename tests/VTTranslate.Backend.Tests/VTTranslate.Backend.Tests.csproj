@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="8.0.11" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+    <!-- Phase 6.5: real-PostgreSQL integration tests — see
+         docs/phase-6.5-database-persistence.md §16 for why SQLite/EF-InMemory are not
+         used here instead. Requires a working Docker daemon; tests self-skip (via
+         SkipIfNoDockerFactAttribute) when one is not available in the current
+         environment, rather than failing the whole suite. -->
+    <PackageReference Include="Testcontainers.PostgreSql" Version="3.10.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\VTTranslate.Backend.Domain\VTTranslate.Backend.Domain.csproj" />
+    <ProjectReference Include="..\..\src\VTTranslate.Backend.Application\VTTranslate.Backend.Application.csproj" />
+    <ProjectReference Include="..\..\src\VTTranslate.Backend.Infrastructure\VTTranslate.Backend.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\VTTranslate.Backend.Api\VTTranslate.Backend.Api.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,20 @@
+bin/
+obj/
+*.user
+.vs/
+
+# Downloaded third-party installer artifacts — never commit binaries pulled from
+# an external site; docs/virtual-audio-decision.md explains how to fetch them again.
+tools/vbcable/
+
+# Generated test audio/output and machine-readable reports — reproducible via
+# `dotnet run --project tools/VTTranslate.LiveTest -- gen-test-audio` /
+# `pipeline-test`, not meant to be committed.
+test-results/
+
+# Never committed, never should exist here — the app reads the Azure key only from
+# environment variables (see docs/architecture.md, AppSettings.cs), but this is a
+# hard backstop in case anyone ever creates one of these by hand.
+appsettings.local.json
+*.env
+.env
