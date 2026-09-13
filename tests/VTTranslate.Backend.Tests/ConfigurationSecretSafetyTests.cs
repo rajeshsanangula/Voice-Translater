@@ -198,7 +198,7 @@ public class ConfigurationSecretSafetyTests
 
         if (!doc.RootElement.TryGetProperty("Identity", out var identity)) return; // not every file has this section
 
-        var allowedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_comment", "Authority", "Audience" };
+        var allowedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_comment", "Authority", "Audience", "Admin" };
         foreach (var property in identity.EnumerateObject())
         {
             Assert.Contains(property.Name, allowedKeys);
@@ -208,6 +208,45 @@ public class ConfigurationSecretSafetyTests
                 var value = property.Value.GetString() ?? "";
                 Assert.True(value.Length < 20, $"Identity:{property.Name} in {path} looks like it may carry a real value ({value.Length} chars) — the committed file must stay empty; real values belong in environment variables or an untracked local override.");
             }
+
+            if (property.Name == "Admin")
+            {
+                var allowedAdminKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_comment", "Authority", "Audience" };
+                foreach (var adminProperty in property.Value.EnumerateObject())
+                {
+                    Assert.Contains(adminProperty.Name, allowedAdminKeys);
+                    if (adminProperty.Name is "Authority" or "Audience")
+                    {
+                        var value = adminProperty.Value.GetString() ?? "";
+                        Assert.True(value.Length < 20, $"Identity:Admin:{adminProperty.Name} in {path} looks like it may carry a real value ({value.Length} chars) — the committed file must stay empty.");
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Phase 7.0: "AccountProvisioning" carries only non-secret policy values — see
+    /// AccountProvisioningOptions's own doc comment. Bounded to sane ranges so a
+    /// committed value can never accidentally configure a nonsensical rate limit.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ConfigFiles))]
+    public void ConfigFile_AccountProvisioningSection_OnlyContainsExpectedKeysAndSaneValues(string path)
+    {
+        var content = File.ReadAllText(path);
+        using var doc = System.Text.Json.JsonDocument.Parse(content);
+
+        if (!doc.RootElement.TryGetProperty("AccountProvisioning", out var section)) return;
+
+        var allowedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "_comment", "Enabled", "RequireEmailVerified", "RateLimitMaxAttempts", "RateLimitWindowSeconds" };
+        foreach (var property in section.EnumerateObject())
+        {
+            Assert.Contains(property.Name, allowedKeys);
+            if (property.Name == "RateLimitMaxAttempts")
+                Assert.InRange(property.Value.GetInt32(), 1, 1000);
+            if (property.Name == "RateLimitWindowSeconds")
+                Assert.InRange(property.Value.GetInt32(), 1, 86400);
         }
     }
 }

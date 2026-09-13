@@ -31,7 +31,7 @@ public sealed class AccountResolutionMiddleware(RequestDelegate next, ILogger<Ac
 {
     public const string AccountItemsKey = "AutraxisAccount";
 
-    public async Task InvokeAsync(HttpContext context, IIdentityProvider identityProvider, IAccountResolutionService accountResolution)
+    public async Task InvokeAsync(HttpContext context, IIdentityProvider identityProvider, IAccountResolutionService accountResolution, IAccountProvisioningService provisioning)
     {
         if (context.User.Identity?.IsAuthenticated != true)
         {
@@ -62,7 +62,24 @@ public sealed class AccountResolutionMiddleware(RequestDelegate next, ILogger<Ac
                 return;
 
             case AccountResolutionOutcome.AccountNotFound:
-                logger.LogInformation("Authenticated identity has no AUTRAXIS account yet.");
+                // Phase 7.0 — gated JIT provisioning (docs/phase-7.0-production-identity-
+                // and-account-lifecycle.md §7/§25). This is the ONLY call site for
+                // provisioning: a controlled, explicit, observable decision point, never
+                // a side effect buried inside AccountResolutionService's own lookup
+                // (which stays pure resolution-only, unchanged, so its existing tests
+                // remain valid).
+                var provisioningResult = await provisioning.ProvisionAsync(principal, context.RequestAborted);
+                if (provisioningResult.Outcome == AccountProvisioningOutcome.Provisioned && provisioningResult.Account is not null)
+                {
+                    context.Items[AccountItemsKey] = provisioningResult.Account;
+                    await next(context);
+                    return;
+                }
+
+                // Deliberately the SAME response as before provisioning existed —
+                // anti-enumeration (§17): a client cannot distinguish "no account and
+                // provisioning denied" from the pre-Phase-7.0 "no account at all" outcome.
+                logger.LogInformation("Authenticated identity has no AUTRAXIS account and provisioning did not apply.");
                 await WriteProblemAsync(context, StatusCodes.Status403Forbidden, "account_not_found");
                 return;
 

@@ -25,6 +25,13 @@ public sealed class InMemoryAccountRepository : IAccountRepository
 
     public Task SaveAsync(Account account, CancellationToken ct)
     {
+        if (_byId.Values.Any(a => a.Id != account.Id &&
+                                   a.ExternalIdentityProvider == account.ExternalIdentityProvider &&
+                                   a.ExternalSubjectId == account.ExternalSubjectId))
+        {
+            throw new Domain.DuplicateIdentityException(account.ExternalIdentityProvider, account.ExternalSubjectId);
+        }
+
         _byId[account.Id] = account;
         return Task.CompletedTask;
     }

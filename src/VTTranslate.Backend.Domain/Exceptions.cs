@@ -37,3 +37,11 @@ public sealed class AccountNotUsableException(Guid accountId, Enums.AccountStatu
     public Guid AccountId { get; } = accountId;
     public Enums.AccountStatus Status { get; } = status;
 }
+
+/// <summary>Phase 7.0: thrown by <see cref="Abstractions.IAccountRepository"/>.SaveAsync when a concurrent provisioning attempt races past the application-level check and collides with the database's own unique constraint on (ExternalIdentityProvider, ExternalSubjectId) — the authoritative backstop against duplicate-account creation. Translated from the database's own constraint violation at the Infrastructure boundary, exactly like <see cref="DuplicateBillingEventException"/>/<see cref="Abstractions.ActiveSessionAlreadyExistsException"/>.</summary>
+public sealed class DuplicateIdentityException(string provider, string externalSubjectId)
+    : Exception($"Identity ({provider}, {externalSubjectId}) already maps to an existing account.")
+{
+    public string Provider { get; } = provider;
+    public string ExternalSubjectId { get; } = externalSubjectId;
+}

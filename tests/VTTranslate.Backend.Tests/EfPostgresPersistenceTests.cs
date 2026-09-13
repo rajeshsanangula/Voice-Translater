@@ -2,10 +2,13 @@ using Microsoft.EntityFrameworkCore;
 using Testcontainers.PostgreSql;
 using VTTranslate.Backend.Application.Devices;
 using VTTranslate.Backend.Application.Entitlements;
+using VTTranslate.Backend.Application.Identity;
 using VTTranslate.Backend.Application.Sessions;
 using VTTranslate.Backend.Domain;
+using VTTranslate.Backend.Domain.Abstractions;
 using VTTranslate.Backend.Domain.Entities;
 using VTTranslate.Backend.Domain.Enums;
+using VTTranslate.Backend.Infrastructure.Identity;
 using VTTranslate.Backend.Infrastructure.Persistence.EfCore;
 using VTTranslate.Backend.Infrastructure.Time;
 
@@ -968,5 +971,106 @@ public sealed class EfPostgresPersistenceTests(PostgresFixture fixture) : IClass
         await using var readDb = fixture.CreateContext();
         var activeSessionCount = await readDb.TranslationSessions.CountAsync(s => s.AccountId == account.Id && s.State == TranslationSessionState.Active);
         Assert.Equal(0, activeSessionCount); // the invariant, verified against real committed data
+    }
+
+    // ---- Phase 7.0: AccountStatus extension / provisioning transaction / concurrency ----
+
+    [SkipIfNoDockerFact]
+    public async Task Account_NewStatusValues_PersistAndRoundTrip()
+    {
+        // No migration/schema change was required for this (Status is already
+        // string-mapped, HasMaxLength(20)) — this test proves that claim against a real
+        // database, not just against the in-memory test double.
+        foreach (var status in new[] { AccountStatus.Pending, AccountStatus.Disabled, AccountStatus.Closed })
+        {
+            var account = NewAccount($"acct-status-{status}-{Guid.NewGuid()}", status: status);
+            await using (var db = fixture.CreateContext())
+            {
+                db.Accounts.Add(account);
+                await db.SaveChangesAsync();
+            }
+
+            await using var readDb = fixture.CreateContext();
+            var reloaded = await readDb.Accounts.FirstAsync(a => a.Id == account.Id);
+            Assert.Equal(status, reloaded.Status);
+            Assert.False(reloaded.IsUsable); // only Active is usable
+        }
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task AccountProvisioning_ExceptionInsideTransaction_RollsBackAccountAndProfileAndAudit()
+    {
+        var clock = new SystemClock();
+        var principal = new AuthenticatedPrincipal("EntraExternalId", $"provision-rollback-{Guid.NewGuid()}", "rollback@example.com", true, "Rollback Test", clock.UtcNow, clock.UtcNow.AddMinutes(15));
+
+        await using var db = fixture.CreateContext();
+        var accounts = new EfAccountRepository(db);
+        var profiles = new EfProfileRepository(db);
+        var audit = new EfAuditEventRepository(db);
+        var unitOfWork = new EfUnitOfWork(db);
+
+        var account = new Account
+        {
+            Id = Guid.NewGuid(), Email = principal.Email!, EmailVerified = true,
+            ExternalIdentityProvider = principal.Provider, ExternalSubjectId = principal.ExternalSubjectId,
+            Role = Role.Customer, Status = AccountStatus.Active, CreatedAt = clock.UtcNow,
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => unitOfWork.ExecuteInTransactionAsync<object?>(async ct =>
+        {
+            await accounts.SaveAsync(account, ct);
+            await profiles.SaveAsync(new Profile { AccountId = account.Id, CreatedAt = clock.UtcNow, UpdatedAt = clock.UtcNow }, ct);
+            await audit.AddAsync(new AuditEvent { Id = Guid.NewGuid(), AccountId = account.Id, EventType = "AccountProvisioned", OccurredAt = clock.UtcNow }, ct);
+            throw new InvalidOperationException("simulated failure after all three writes, before commit");
+        }, CancellationToken.None));
+
+        await using var readDb = fixture.CreateContext();
+        Assert.Null(await readDb.Accounts.FirstOrDefaultAsync(a => a.Id == account.Id)); // no Account without Profile/audit
+        Assert.Null(await readDb.Profiles.FirstOrDefaultAsync(p => p.AccountId == account.Id)); // no Profile without Account
+        Assert.False(await readDb.AuditEvents.AnyAsync(e => e.AccountId == account.Id)); // no orphaned audit record
+    }
+
+    [SkipIfNoDockerFact]
+    public async Task ConcurrentFirstLogin_SameIdentity_CreatesExactlyOneAccount_RealPostgres()
+    {
+        const int concurrentAttempts = 10;
+        var subject = $"concurrent-first-login-{Guid.NewGuid()}";
+        var clock = new SystemClock();
+        var principal = new AuthenticatedPrincipal("EntraExternalId", subject, "concurrent@example.com", true, "Concurrent Test", clock.UtcNow, clock.UtcNow.AddMinutes(15));
+
+        // Each concurrent "caller" gets its OWN DbContext/connection/service graph — a
+        // shared DbContext is not safe for parallel use and would not exercise the real
+        // multi-connection race this test exists to prove is closed (mirrors the
+        // established Phase 6.7/6.9 concurrency-test pattern exactly).
+        var tasks = Enumerable.Range(0, concurrentAttempts).Select(async _ =>
+        {
+            await using var db = fixture.CreateContext();
+            var service = new AccountProvisioningService(
+                new EfAccountRepository(db), new EfProfileRepository(db), new EfAuditEventRepository(db),
+                new EfUnitOfWork(db), clock, new InMemoryProvisioningRateLimiter(clock),
+                enabled: true, requireEmailVerified: true, rateLimitMaxAttempts: concurrentAttempts + 1, rateLimitWindow: TimeSpan.FromHours(1));
+
+            return await service.ProvisionAsync(principal, CancellationToken.None);
+        });
+
+        var results = await Task.WhenAll(tasks);
+
+        // Every single concurrent attempt reports success — the "losing" requests
+        // resolve to the winner's Account rather than surfacing an error.
+        Assert.All(results, r => Assert.Equal(AccountProvisioningOutcome.Provisioned, r.Outcome));
+        Assert.All(results, r => Assert.NotNull(r.Account));
+
+        var distinctAccountIds = results.Select(r => r.Account!.Id).Distinct().ToList();
+        Assert.Single(distinctAccountIds); // exactly one Account was ever created
+
+        await using var readDb = fixture.CreateContext();
+        var matchingAccounts = await readDb.Accounts.Where(a => a.ExternalIdentityProvider == "EntraExternalId" && a.ExternalSubjectId == subject).ToListAsync();
+        Assert.Single(matchingAccounts); // exactly one row committed — the unique constraint is the real backstop
+
+        var matchingProfiles = await readDb.Profiles.Where(p => p.AccountId == matchingAccounts[0].Id).ToListAsync();
+        Assert.Single(matchingProfiles); // exactly one Profile — never duplicated, never missing
+
+        var provisionedAuditEvents = await readDb.AuditEvents.Where(e => e.AccountId == matchingAccounts[0].Id && e.EventType == "AccountProvisioned").ToListAsync();
+        Assert.Single(provisionedAuditEvents); // exactly one audit record — the losing transactions rolled back, they never committed a second audit row
     }
 }

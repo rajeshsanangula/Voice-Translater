@@ -28,12 +28,27 @@ public sealed class EfAccountRepository(AutraxisDbContext db) : IAccountReposito
     public Task<Account?> FindByExternalIdentityAsync(string provider, string externalSubjectId, CancellationToken ct) =>
         db.Accounts.FirstOrDefaultAsync(a => a.ExternalIdentityProvider == provider && a.ExternalSubjectId == externalSubjectId, ct);
 
+    private const string UniqueViolationSqlState = "23505";
+
     public async Task SaveAsync(Account account, CancellationToken ct)
     {
         var existing = await db.Accounts.FirstOrDefaultAsync(a => a.Id == account.Id, ct);
         if (existing is null) db.Accounts.Add(account);
         else db.Entry(existing).CurrentValues.SetValues(account);
-        await db.SaveChangesAsync(ct);
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: UniqueViolationSqlState })
+        {
+            // Phase 7.0 — a concurrent first-login provisioning race lost against the
+            // (ExternalIdentityProvider, ExternalSubjectId) unique index. Translated here
+            // so Application never references Npgsql/EF Core types directly (matches the
+            // existing DuplicateBillingEventException/ActiveSessionAlreadyExistsException
+            // pattern).
+            throw new Domain.DuplicateIdentityException(account.ExternalIdentityProvider, account.ExternalSubjectId);
+        }
     }
 
     // Phase 6.7 — real PostgreSQL row lock (SELECT ... FOR UPDATE), closing the

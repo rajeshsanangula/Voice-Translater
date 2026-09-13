@@ -13,6 +13,7 @@ using VTTranslate.Backend.Domain;
 using VTTranslate.Backend.Domain.Abstractions;
 using VTTranslate.Backend.Domain.Entities;
 using VTTranslate.Backend.Domain.Enums;
+using VTTranslate.Backend.Application.Profiles;
 using VTTranslate.Backend.Infrastructure.Billing;
 using VTTranslate.Backend.Infrastructure.Identity;
 using VTTranslate.Backend.Infrastructure.Persistence;
@@ -41,6 +42,21 @@ if (string.IsNullOrWhiteSpace(identityOptions.Authority) || string.IsNullOrWhite
     // real Entra configuration; the JwtBearer handler's own behavior below still fails
     // every real authentication attempt closed regardless of this log line).
     Console.WriteLine("[startup] Identity:Authority/Identity:Audience are not configured — authentication will fail closed for every request until configured.");
+}
+
+// Phase 7.0 — separate admin/workforce authentication boundary
+// (docs/phase-7.0-production-identity-and-account-lifecycle.md §12/§13). A completely
+// separate, non-default JwtBearer scheme with its own Authority/Audience — never the
+// customer "Identity:Authority"/"Identity:Audience" keys, never renamed, per the
+// explicit instruction to preserve those unchanged. No admin API endpoint uses this
+// scheme yet in Phase 7.0 (by design — see the master prompt's explicit "do not build a
+// full admin API" instruction); the scheme+policy exist only so the boundary itself is
+// safe and testable ahead of any future admin surface.
+var adminIdentityOptions = builder.Configuration.GetSection(AdminIdentityOptions.SectionName).Get<AdminIdentityOptions>()
+                            ?? new AdminIdentityOptions();
+if (string.IsNullOrWhiteSpace(adminIdentityOptions.Authority) || string.IsNullOrWhiteSpace(adminIdentityOptions.Audience))
+{
+    Console.WriteLine("[startup] Identity:Admin:Authority/Identity:Admin:Audience are not configured — admin-scheme authentication will fail closed until configured.");
 }
 
 builder.Services
@@ -80,9 +96,37 @@ builder.Services
                 return Task.CompletedTask;
             },
         };
+    })
+    .AddJwtBearer(AdminIdentityOptions.SchemeName, options =>
+    {
+        options.Authority = adminIdentityOptions.Authority;
+        options.Audience = adminIdentityOptions.Audience;
+        options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
+        options.MapInboundClaims = false;
+        options.Events = new JwtBearerEvents
+        {
+            OnAuthenticationFailed = context =>
+            {
+                context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger("AdminAuthentication")
+                    .LogInformation("Admin-scheme bearer authentication failed: {Reason}", context.Exception.GetType().Name);
+                return Task.CompletedTask;
+            },
+        };
     });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    // Explicit scheme selection, fail closed: this policy ONLY accepts a token
+    // validated under the admin scheme above — a customer-audience token can never
+    // satisfy it (wrong issuer/audience/signing key), and the default scheme's own
+    // RequireAuthorization() policy is never consulted for a route using this policy.
+    options.AddPolicy(AdminIdentityOptions.SchemeName, policy =>
+    {
+        policy.AuthenticationSchemes.Add(AdminIdentityOptions.SchemeName);
+        policy.RequireAuthenticatedUser();
+    });
+});
 
 // ---- Dependency injection: domain abstractions -> infrastructure implementations ----
 builder.Services.AddSingleton<IClock, SystemClock>();
@@ -165,6 +209,32 @@ builder.Services.AddSingleton<IIdentityProvider, EntraIdentityProvider>();
 // parameter it's called with), so it has no scoped-repository lifetime mismatch to fix
 // and remains Singleton, unchanged from Phase 6.4.
 builder.Services.AddScoped<IAccountResolutionService, AccountResolutionService>();
+
+// ---- Phase 7.0: gated JIT account provisioning, account lifecycle, profile ----
+// AccountProvisioning:* is non-secret (see AccountProvisioningOptions's own doc
+// comment). The rate limiter is registered Singleton because it deliberately holds
+// small in-memory state ACROSS requests (that is its entire purpose) — see
+// InMemoryProvisioningRateLimiter's own doc comment for why this is explicitly NOT a
+// production-grade implementation for a multi-instance deployment.
+var accountProvisioningOptions = builder.Configuration.GetSection(AccountProvisioningOptions.SectionName).Get<AccountProvisioningOptions>()
+                                  ?? new AccountProvisioningOptions();
+var provisioningRateLimitWindow = TimeSpan.FromSeconds(accountProvisioningOptions.RateLimitWindowSeconds > 0 ? accountProvisioningOptions.RateLimitWindowSeconds : 3600);
+
+builder.Services.AddSingleton<IProvisioningRateLimiter, InMemoryProvisioningRateLimiter>();
+builder.Services.AddScoped<IAccountProvisioningService>(sp => new AccountProvisioningService(
+    sp.GetRequiredService<IAccountRepository>(),
+    sp.GetRequiredService<IProfileRepository>(),
+    sp.GetRequiredService<IAuditEventRepository>(),
+    sp.GetRequiredService<IUnitOfWork>(),
+    sp.GetRequiredService<IClock>(),
+    sp.GetRequiredService<IProvisioningRateLimiter>(),
+    accountProvisioningOptions.Enabled,
+    accountProvisioningOptions.RequireEmailVerified,
+    accountProvisioningOptions.RateLimitMaxAttempts,
+    provisioningRateLimitWindow));
+
+builder.Services.AddScoped<IAccountLifecycleService, AccountLifecycleService>();
+builder.Services.AddScoped<IProfileService, ProfileService>();
 
 // Billing remains a deliberate placeholder — out of scope for Phase 6.4 (see
 // docs/phase-6.4-entra-authentication.md "Deferred work"). Phase 6.6 extends the
@@ -566,6 +636,29 @@ app.MapPost("/translation-sessions/{id:guid}/end", async (HttpContext ctx, Guid 
     };
 }).RequireAuthorization();
 
+// ---- Phase 7.0: customer profile self-service ----
+// AccountId always comes from AccountResolutionMiddleware — never from the request body,
+// a route parameter, or a query string; these two endpoints do not accept an AccountId
+// at all (docs/phase-7.0-production-identity-and-account-lifecycle.md §33).
+app.MapGet("/profile", async (HttpContext ctx, IProfileService profileService) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var profile = await profileService.GetAsync(account.Id, ctx.RequestAborted);
+    return Results.Ok(new { displayName = profile.DisplayName, preferredLanguagePair = profile.PreferredLanguagePair, updatedAt = profile.UpdatedAt });
+}).RequireAuthorization();
+
+app.MapPut("/profile", async (HttpContext ctx, UpdateProfileRequest request, IProfileService profileService) =>
+{
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    var result = await profileService.UpdateAsync(account.Id, request.DisplayName, request.PreferredLanguagePair, ctx.RequestAborted);
+
+    return result.Outcome switch
+    {
+        ProfileUpdateOutcome.Success => Results.Ok(new { displayName = result.Profile!.DisplayName, preferredLanguagePair = result.Profile.PreferredLanguagePair, updatedAt = result.Profile.UpdatedAt }),
+        _ => Results.BadRequest(new { status = "invalid_profile" }),
+    };
+}).RequireAuthorization();
+
 // Phase 6.4 AUTHORIZATION-BOUNDARY PROOF ONLY — not a product feature. Exists solely so
 // the CUSTOMER-vs-ADMIN-vs-SUPER_ADMIN role gate can be exercised end-to-end over real
 // HTTP in an integration test (see VTTranslate.Backend.Tests). Still returns the same
@@ -574,6 +667,16 @@ app.MapPost("/translation-sessions/{id:guid}/end", async (HttpContext ctx, Guid 
 NotImplementedPlaceholder(app, "/internal/diagnostics")
     .RequireAuthorization()
     .RequireAutraxisRole(Role.SuperAdmin);
+
+// Phase 7.0 ADMIN/CUSTOMER BOUNDARY PROOF ONLY — not a product feature, and explicitly
+// NOT an admin API (docs/phase-7.0-production-identity-and-account-lifecycle.md §12/§32
+// forbid building one in this phase). Exists solely so the customer-vs-admin-scheme
+// separation can be exercised end-to-end over real HTTP in an integration test — a
+// customer-audience token can never satisfy the "AdminScheme" policy, and this route
+// never touches AccountResolutionMiddleware/Account at all (admin identities are not
+// AUTRAXIS customer accounts).
+NotImplementedPlaceholder(app, "/internal/admin-boundary")
+    .RequireAuthorization(AdminIdentityOptions.SchemeName);
 
 app.Run();
 
@@ -598,6 +701,9 @@ public sealed record ProviderAccessRequest(string DeviceId, string Provider, str
 
 /// <summary>Phase 6.9: request body for POST /translation-sessions. Deliberately carries no accountId/entitlementId/subscriptionId/usageAmount/usageDuration/allowedMinutes/providerSecret — the account comes from AccountResolutionMiddleware; ClientSessionId is an optional correlation key for idempotency/reconnect only, never the database primary identity.</summary>
 public sealed record StartTranslationSessionRequest(string DeviceId, string? ClientSessionId, string? Direction);
+
+/// <summary>Phase 7.0: request body for PUT /profile. Deliberately carries no AccountId — the account comes from AccountResolutionMiddleware; both fields are optional, matching the entity's own nullable shape.</summary>
+public sealed record UpdateProfileRequest(string? DisplayName, string? PreferredLanguagePair);
 
 /// <summary>Exposed for VTTranslate.Backend.Tests' WebApplicationFactory-based integration tests (health, placeholder, and authentication/authorization boundary tests).</summary>
 public partial class Program;
