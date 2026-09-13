@@ -1,0 +1,66 @@
+name: Phase 6.5 — Database Persistence Verification
+
+# Narrowly scoped verification infrastructure only (see
+# docs/phase-6.5-ci-verification.md). This workflow does not build, deploy, or publish
+# anything — it exists solely to run the backend test suite (including the
+# Testcontainers-based real-PostgreSQL integration tests) on a Docker-capable
+# GitHub-hosted runner, since Phase 6.5's own dev sandbox has no Docker daemon. It adds
+# no new test logic, no new persistence code, and no substitute database — the same
+# EfPostgresPersistenceTests.cs that starts a real postgres:16-alpine container via
+# Testcontainers.PostgreSql runs completely unmodified.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+jobs:
+  verify-backend-persistence:
+    # ubuntu-latest GitHub-hosted runners ship with a working Docker daemon already
+    # running — exactly what Testcontainers.PostgreSql needs to start a real postgres
+    # container. No self-hosted runner, no Docker-in-Docker setup, no SQLite/in-memory
+    # substitute is introduced anywhere in this job.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Confirm Docker is available (required for real-PostgreSQL tests)
+        run: docker version
+
+      - name: Build full solution
+        run: dotnet build VTTranslate.sln --configuration Release
+
+      - name: Run backend test suite (includes 21 real-PostgreSQL Testcontainers tests)
+        # Run exactly as implemented — no filter excludes EfPostgresPersistenceTests, no
+        # environment variable disables Docker, no substitute connection string is
+        # supplied. --logger reports exact pass/skip/fail counts in the job output.
+        run: >
+          dotnet test tests/VTTranslate.Backend.Tests/VTTranslate.Backend.Tests.csproj
+          --configuration Release
+          --logger "console;verbosity=detailed"
+          --logger "trx;LogFileName=backend-tests.trx"
+          --results-directory ./test-results
+
+      - name: Run existing Windows/Core test suite (baseline: 399/399)
+        run: >
+          dotnet test tests/VTTranslate.Core.Tests/VTTranslate.Core.Tests.csproj
+          --configuration Release
+          --logger "console;verbosity=detailed"
+          --logger "trx;LogFileName=core-tests.trx"
+          --results-directory ./test-results
+
+      - name: Upload test result files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-6.5-test-results
+          path: ./test-results/*.trx
