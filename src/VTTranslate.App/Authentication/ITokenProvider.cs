@@ -28,6 +28,20 @@ public interface ITokenProvider
 
     /// <summary>True if a cached account exists that MAY still be able to silently acquire a token — does not itself acquire one, so it never launches a browser and never throws.</summary>
     Task<bool> HasCachedAccountAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Corrective patch (Phase 7.1 runtime-risk audit, Risk 2) — a stable identifier
+    /// for the currently-authenticated (or, if none, most-recently-used cached) Entra
+    /// identity, used ONLY to key local, per-identity client-side state (currently:
+    /// <see cref="VTTranslate.App.Devices.IDeviceIdentityStore"/>'s device-id persistence) so that
+    /// state is never accidentally shared across two different signed-in accounts on
+    /// the same Windows profile. This is NOT the AUTRAXIS AccountId (the client never
+    /// learns that value at all — it is resolved and kept entirely server-side) and
+    /// carries no authorization meaning of its own; it never leaves this process and
+    /// is never sent to the AUTRAXIS API. Returns null if there is no
+    /// current/cached account to key by.
+    /// </summary>
+    Task<string?> GetAccountKeyAsync(CancellationToken ct = default);
 }
 
 /// <summary>Thrown by <see cref="ITokenProvider.GetAccessTokenAsync"/> when a valid access token cannot be produced without interactive authentication the caller did not permit, or when the user cancelled/failed an interactive attempt. Never carries token/claim content — see docs §25.</summary>

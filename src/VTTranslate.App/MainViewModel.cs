@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Input;
 using VTTranslate.App.Api;
 using VTTranslate.App.Authentication;
+using VTTranslate.App.Devices;
 using VTTranslate.Core.Audio;
 using VTTranslate.Core.Config;
 using VTTranslate.Core.Diagnostics;
@@ -51,7 +52,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     private ITokenProvider? _tokenProvider;
     private IAutraxisApiClient? _apiClient;
     private readonly HttpClient _httpClient = new();
-    private Guid? _deviceId;
+    private IDeviceRegistrationCoordinator? _deviceCoordinator;
     private Guid? _activeSessionId;
     private CancellationTokenSource? _heartbeatCts;
 
@@ -216,6 +217,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
             var msalProvider = await MsalTokenProvider.CreateAsync(_authOptions, cacheStore);
             _tokenProvider = msalProvider;
             _apiClient = new AutraxisApiClient(_httpClient, msalProvider, _authOptions);
+            // Corrective patch (Phase 7.1 runtime-risk audit, Risk 2): persists and
+            // reuses the server-issued Device.Id across process restarts instead of
+            // registering a new one every launch — see DeviceRegistrationCoordinator's
+            // own doc comment.
+            _deviceCoordinator = new DeviceRegistrationCoordinator(_apiClient, msalProvider, new LocalFileDeviceIdentityStore(), "Windows", Environment.MachineName);
 
             var authService = new AuthenticationService(msalProvider);
             authService.StateChanged += (_, state) => Application.Current.Dispatcher.Invoke(() => AuthState = state);
@@ -263,7 +269,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     {
         if (IsRunning) await StopAsync();
         if (_authService is not null) await _authService.SignOutAsync();
-        _deviceId = null; // do not carry a stale device identity across a different signed-in account (docs §14 multi-account)
+        // Corrective patch (Phase 7.1 runtime-risk audit, Risk 2): device identity is
+        // deliberately NOT cleared here. Signing out is an authentication/session
+        // concern only — it must never consume another pooled device slot on the next
+        // sign-in. The persisted device id remains associated with this local
+        // installation (keyed by MSAL's own per-identity HomeAccountId, see
+        // MsalTokenProvider.GetAccountKeyAsync) and is reused automatically the next
+        // time the SAME account signs in; signing in as a genuinely DIFFERENT account
+        // naturally looks up under a different key and is never handed the wrong
+        // account's device id (see DeviceRegistrationCoordinator/IDeviceIdentityStore).
         AccountStatusMessage = "";
     }
 
@@ -320,22 +334,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     }
 
     /// <summary>
-    /// Phase 7.1: registers (once per signed-in session) the AUTRAXIS logical device
-    /// this application instance represents — server-generated Device.Id only, never
-    /// a hardware fingerprint (docs §18, Phase 6.7 unchanged). Pooled MaxActiveDevices
-    /// enforcement is entirely server-side; this method surfaces whatever the backend
-    /// decides, it does not itself enforce any limit.
-    /// </summary>
-    private async Task<Guid> EnsureDeviceRegisteredAsync(CancellationToken ct)
-    {
-        if (_deviceId is { } existing) return existing;
-
-        var device = await _apiClient!.RegisterDeviceAsync("Windows", Environment.MachineName, ct);
-        _deviceId = device.Id;
-        return device.Id;
-    }
-
-    /// <summary>
     /// Phase 7.1 — THE production customer-application provider-access path,
     /// replacing the retired direct <c>AZURE_SPEECH_KEY</c>/subscription-key
     /// construction entirely (docs §18/§23). Obtains a short-lived Azure STS
@@ -370,7 +368,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
             return;
         }
 
-        if (!IsSignedIn || _apiClient is null)
+        if (!IsSignedIn || _apiClient is null || _deviceCoordinator is null)
         {
             LastError = "Please sign in before starting a session.";
             Status = "Configuration error";
@@ -387,12 +385,21 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
 
         try
         {
-            var deviceId = await EnsureDeviceRegisteredAsync(_cts.Token);
+            // Corrective patch (Phase 7.1 runtime-risk audit, Risk 2): reuses the
+            // persisted server-issued Device.Id across process restarts (no POST
+            // /devices call at all if one is already on record for this identity) and
+            // applies the bounded, at-most-one-replacement recovery
+            // (DeviceRegistrationCoordinator) to every device-scoped call below — a
+            // revoked/rejected device is replaced exactly once, never retried in a
+            // loop.
+            var deviceId = await _deviceCoordinator.EnsureDeviceRegisteredAsync(_cts.Token);
 
             // One AUTRAXIS translation session represents this bidirectional
             // customer session (Phase 6.9, unchanged) — duration/usage are computed
             // entirely server-side; this client never submits a duration or amount.
-            var session = await _apiClient.StartTranslationSessionAsync(deviceId, clientSessionId: null, direction: "en-US:de-DE", _cts.Token);
+            var (session, deviceIdAfterSessionStart) = await _deviceCoordinator.ExecuteWithDeviceRecoveryAsync(
+                deviceId, id => _apiClient.StartTranslationSessionAsync(id, clientSessionId: null, direction: "en-US:de-DE", _cts.Token), _cts.Token);
+            deviceId = deviceIdAfterSessionStart;
             _activeSessionId = session.SessionId;
 
             var micToGermanSession = new Core.Session.TranslationSession
@@ -401,11 +408,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
                 SourceLanguage = "en-US",
                 TargetLanguage = "de-DE"
             };
+            var (micProvider, deviceIdAfterMic) = await _deviceCoordinator.ExecuteWithDeviceRecoveryAsync(
+                deviceId, id => CreateAuthenticatedProviderAsync(id, "de-DE-KatjaNeural", _cts.Token), _cts.Token);
+            deviceId = deviceIdAfterMic;
             _micToGerman = new DirectionPipeline(
                 micToGermanSession,
                 new AudioCaptureSource(Settings.MicrophoneDeviceId!, CaptureKind.Microphone),
                 new AudioPlaybackSink(Settings.GermanOutputDeviceId!),
-                await CreateAuthenticatedProviderAsync(deviceId, "de-DE-KatjaNeural", _cts.Token));
+                micProvider);
 
             var remoteToEnglishSession = new Core.Session.TranslationSession
             {
@@ -413,11 +423,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
                 SourceLanguage = "de-DE",
                 TargetLanguage = "en-US"
             };
+            var (remoteProvider, _) = await _deviceCoordinator.ExecuteWithDeviceRecoveryAsync(
+                deviceId, id => CreateAuthenticatedProviderAsync(id, "en-US-JennyNeural", _cts.Token), _cts.Token);
             _remoteToEnglish = new DirectionPipeline(
                 remoteToEnglishSession,
                 new AudioCaptureSource(Settings.RemoteAudioInputDeviceId!, CaptureKind.SystemLoopback),
                 new AudioPlaybackSink(Settings.EnglishOutputDeviceId!),
-                await CreateAuthenticatedProviderAsync(deviceId, "en-US-JennyNeural", _cts.Token));
+                remoteProvider);
 
             HookTranscript(_micToGerman, "EN→DE");
             HookTranscript(_remoteToEnglish, "DE→EN");

@@ -50,4 +50,9 @@ public sealed class FakeTokenProvider : ITokenProvider
     }
 
     public Task<bool> HasCachedAccountAsync(CancellationToken ct = default) => Task.FromResult(HasCachedAccount);
+
+    /// <summary>Configurable per test — defaults to a stable value so most tests don't need to set it.</summary>
+    public string? AccountKey { get; set; } = "test-account-key";
+
+    public Task<string?> GetAccountKeyAsync(CancellationToken ct = default) => Task.FromResult(AccountKey);
 }

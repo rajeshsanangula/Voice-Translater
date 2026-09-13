@@ -123,4 +123,14 @@ public sealed class MsalTokenProvider : ITokenProvider
 
     public async Task<bool> HasCachedAccountAsync(CancellationToken ct = default) =>
         (await _app.GetAccountsAsync()).Any();
+
+    public async Task<string?> GetAccountKeyAsync(CancellationToken ct = default)
+    {
+        var account = _lastUsedAccount ?? (await _app.GetAccountsAsync()).FirstOrDefault();
+        // HomeAccountId.Identifier is MSAL's own stable per-Entra-identity key — the
+        // same account always yields the same value across process restarts, and two
+        // different accounts never collide. Never the AUTRAXIS AccountId (unknown to
+        // this class), never sent to the API — local keying only.
+        return account?.HomeAccountId?.Identifier;
+    }
 }
