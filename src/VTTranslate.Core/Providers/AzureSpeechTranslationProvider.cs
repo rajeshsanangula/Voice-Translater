@@ -35,12 +35,17 @@ namespace VTTranslate.Core.Providers;
 /// gap and the planned future mitigation (a user-controlled mute/push-to-talk control).
 /// Transcript display (<see cref="FinalResult"/>) is unaffected by this gate either way.
 /// </summary>
-public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider, IReconnectingProvider
+public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider, IReconnectingProvider, IRenewableCredentialProvider
 {
     private const int MaxReconnectAttempts = 5;
 
     private readonly string? _subscriptionKey;
-    private readonly string? _authorizationToken;
+    // Phase 7.2: mutable (was readonly) so a live-renewed token also becomes the
+    // token any LATER reconnect uses (docs §18, "reconnect uses newest credential")
+    // — every read/write of this field happens under _connectionLock (either via
+    // CreateAndStartRecognizerLockedAsync or TryUpdateAuthorizationTokenAsync below),
+    // so no additional synchronization is needed.
+    private string? _authorizationToken;
     private readonly string _region;
     private readonly string _voiceName;
     private readonly SemaphoreSlim _connectionLock = new(1, 1);
@@ -199,6 +204,41 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
         try
         {
             await CreateAndStartRecognizerLockedAsync();
+        }
+        finally
+        {
+            _connectionLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Phase 7.2 — <see cref="IRenewableCredentialProvider"/>. Live-replaces the
+    /// authorization token on the currently-running recognizer, per the empirically
+    /// validated Azure Speech SDK behavior (see this file's class doc comment and
+    /// docs/phase-7.2-long-running-translation-session-continuity.md). Serialized
+    /// through the SAME <see cref="_connectionLock"/> the reconnect path already
+    /// uses, so this can never race a concurrent Stop()/dispose/reconnect: if
+    /// <see cref="StopAsync"/> has already set <see cref="_stopRequested"/> (and
+    /// possibly already disposed the recognizer) by the time this acquires the lock,
+    /// this method observes that under the lock and returns false without touching
+    /// anything — Stop always wins. <see cref="_authorizationToken"/> is updated
+    /// FIRST, unconditionally, so that even when there is no live recognizer to
+    /// update right now (e.g. a reconnect is about to run), the next
+    /// (re)connect still picks up the newest token rather than a stale one.
+    /// </summary>
+    public async Task<bool> TryUpdateAuthorizationTokenAsync(string newToken, CancellationToken ct)
+    {
+        await _connectionLock.WaitAsync(ct);
+        try
+        {
+            _authorizationToken = newToken;
+
+            if (_stopRequested || _recognizer is null)
+                return false; // Stop already won, or nothing has started yet — not a failure to retry
+
+            _recognizer.AuthorizationToken = newToken;
+            _logger.Log(SessionTag, "ProviderCredentialLiveReplacementApplied", $"generation={_generation}");
+            return true;
         }
         finally
         {

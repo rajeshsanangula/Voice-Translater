@@ -7,6 +7,7 @@ using System.Windows.Input;
 using VTTranslate.App.Api;
 using VTTranslate.App.Authentication;
 using VTTranslate.App.Devices;
+using VTTranslate.App.Providers;
 using VTTranslate.Core.Audio;
 using VTTranslate.Core.Config;
 using VTTranslate.Core.Diagnostics;
@@ -55,6 +56,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     private IDeviceRegistrationCoordinator? _deviceCoordinator;
     private Guid? _activeSessionId;
     private CancellationTokenSource? _heartbeatCts;
+
+    // ---- Phase 7.2: long-running session continuity — one renewal coordinator per
+    // direction, never shared mutable state between them (docs
+    // phase-7.2-long-running-translation-session-continuity.md §14/§16). ----
+    private IProviderCredentialRenewalCoordinator? _micToGermanRenewal;
+    private IProviderCredentialRenewalCoordinator? _remoteToEnglishRenewal;
 
     private string _status = "Idle";
     public string Status { get => _status; set { _status = value; Raise(); Raise(nameof(StatusKind)); } }
@@ -343,10 +350,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     /// credential is held only in the local variables of this call (and the resulting
     /// provider's own short-lived internal use) — never persisted, never logged.
     /// </summary>
-    private async Task<AzureSpeechTranslationProvider> CreateAuthenticatedProviderAsync(Guid deviceId, string voiceName, CancellationToken ct)
+    private async Task<(AzureSpeechTranslationProvider Provider, ProviderAccessGrantDto Grant)> CreateAuthenticatedProviderAsync(Guid deviceId, string voiceName, CancellationToken ct)
     {
         var grant = await _apiClient!.RequestProviderAccessAsync(deviceId, "AzureSpeech", "SpeechRecognition", ct);
-        return AzureSpeechTranslationProvider.FromAuthorizationToken(grant.AccessToken, grant.Region, voiceName, _diagnosticLogger);
+        var provider = AzureSpeechTranslationProvider.FromAuthorizationToken(grant.AccessToken, grant.Region, voiceName, _diagnosticLogger);
+        return (provider, grant);
     }
 
     private async Task StartAsync()
@@ -408,14 +416,19 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
                 SourceLanguage = "en-US",
                 TargetLanguage = "de-DE"
             };
-            var (micProvider, deviceIdAfterMic) = await _deviceCoordinator.ExecuteWithDeviceRecoveryAsync(
+            var (micResult, deviceIdAfterMic) = await _deviceCoordinator.ExecuteWithDeviceRecoveryAsync(
                 deviceId, id => CreateAuthenticatedProviderAsync(id, "de-DE-KatjaNeural", _cts.Token), _cts.Token);
             deviceId = deviceIdAfterMic;
             _micToGerman = new DirectionPipeline(
                 micToGermanSession,
                 new AudioCaptureSource(Settings.MicrophoneDeviceId!, CaptureKind.Microphone),
                 new AudioPlaybackSink(Settings.GermanOutputDeviceId!),
-                micProvider);
+                micResult.Provider);
+            // Phase 7.2: one renewal coordinator for THIS direction only, started once
+            // the pipeline itself starts (below) so the session-lifetime token (_cts)
+            // it links to is the one actually governing this session.
+            _micToGermanRenewal = new ProviderCredentialRenewalCoordinator(
+                _apiClient, micResult.Provider, deviceId, "AzureSpeech", "SpeechRecognition", "EN→DE", _diagnosticLogger);
 
             var remoteToEnglishSession = new Core.Session.TranslationSession
             {
@@ -423,13 +436,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
                 SourceLanguage = "de-DE",
                 TargetLanguage = "en-US"
             };
-            var (remoteProvider, _) = await _deviceCoordinator.ExecuteWithDeviceRecoveryAsync(
+            var (remoteResult, deviceIdAfterRemote) = await _deviceCoordinator.ExecuteWithDeviceRecoveryAsync(
                 deviceId, id => CreateAuthenticatedProviderAsync(id, "en-US-JennyNeural", _cts.Token), _cts.Token);
             _remoteToEnglish = new DirectionPipeline(
                 remoteToEnglishSession,
                 new AudioCaptureSource(Settings.RemoteAudioInputDeviceId!, CaptureKind.SystemLoopback),
                 new AudioPlaybackSink(Settings.EnglishOutputDeviceId!),
-                remoteProvider);
+                remoteResult.Provider);
+            _remoteToEnglishRenewal = new ProviderCredentialRenewalCoordinator(
+                _apiClient, remoteResult.Provider, deviceIdAfterRemote, "AzureSpeech", "SpeechRecognition", "DE→EN", _diagnosticLogger);
 
             HookTranscript(_micToGerman, "EN→DE");
             HookTranscript(_remoteToEnglish, "DE→EN");
@@ -440,6 +455,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
 
             await _micToGerman.StartAsync(_cts.Token);
             await _remoteToEnglish.StartAsync(_cts.Token);
+
+            // Phase 7.2: begin proactive credential renewal for each direction only
+            // once its own recognizer is actually running — linked to the SAME
+            // session-lifetime token (_cts) that governs Stop()/cancellation for
+            // everything else in this session, so Stop() always wins here too.
+            _micToGermanRenewal.Start(micResult.Grant.ExpiresAt, _cts.Token);
+            _remoteToEnglishRenewal.Start(remoteResult.Grant.ExpiresAt, _cts.Token);
 
             IsRunning = true;
             Status = "Running";
@@ -590,8 +612,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
 
     private async Task StopAsync()
     {
-        _cts?.Cancel();
+        _cts?.Cancel(); // Phase 7.2: cancels the SAME linked token both renewal coordinators run on — Stop() always wins (docs §14/§18)
         _heartbeatCts?.Cancel();
+
+        if (_micToGermanRenewal is not null) await _micToGermanRenewal.DisposeAsync();
+        if (_remoteToEnglishRenewal is not null) await _remoteToEnglishRenewal.DisposeAsync();
+        _micToGermanRenewal = null;
+        _remoteToEnglishRenewal = null;
+
         if (_micToGerman != null) await _micToGerman.DisposeAsync();
         if (_remoteToEnglish != null) await _remoteToEnglish.DisposeAsync();
         _micToGerman = null;
