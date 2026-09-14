@@ -23,4 +23,21 @@ public interface IAutraxisApiClient
     Task<Api.TranslationSessionStartedDto> StartTranslationSessionAsync(Guid deviceId, string? clientSessionId, string? direction, CancellationToken ct = default);
     Task<Api.TranslationSessionOperationDto> HeartbeatTranslationSessionAsync(Guid sessionId, CancellationToken ct = default);
     Task<Api.TranslationSessionOperationDto> EndTranslationSessionAsync(Guid sessionId, CancellationToken ct = default);
+
+    // ---- Phase 7.3: customer subscription/entitlement/usage visibility ----
+    // Read-mostly; the client is never authoritative for any of this data (docs
+    // phase-7.3-customer-subscription-and-usage-visibility.md §16) — every value is
+    // re-fetched from the backend, never cached beyond the current view's lifetime.
+
+    /// <summary>Throws <see cref="AutraxisApiException"/> with <see cref="Api.ApiErrorCategory.NoSubscription"/> if the account has no subscription row yet (the backend's own guaranteed `no_subscription` shape) — never inferred from a generic 404.</summary>
+    Task<Api.SubscriptionDto> GetSubscriptionAsync(CancellationToken ct = default);
+
+    /// <summary>Same <see cref="Api.ApiErrorCategory.NoSubscription"/> contract as <see cref="GetSubscriptionAsync"/> — the backend returns the identical shape when there is no subscription.</summary>
+    Task<Api.EntitlementsDto> GetEntitlementsAsync(CancellationToken ct = default);
+
+    /// <summary>Never 404s for "no subscription" — the backend computes a usage summary unconditionally (UsageService.GetSummaryAsync), so this call has no <see cref="Api.ApiErrorCategory.NoSubscription"/> case.</summary>
+    Task<Api.UsageSummaryDto> GetUsageAsync(CancellationToken ct = default);
+
+    /// <summary>Preserves the existing backend cancellation contract exactly (`CancelSubscriptionRequest(bool Immediate)`, Program.cs) — <paramref name="immediate"/> true cancels now; false schedules cancellation at the current period's end. Never invents a third policy.</summary>
+    Task<Api.CancelSubscriptionResultDto> CancelSubscriptionAsync(bool immediate, CancellationToken ct = default);
 }

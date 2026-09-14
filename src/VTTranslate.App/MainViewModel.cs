@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Input;
+using VTTranslate.App.Account;
 using VTTranslate.App.Api;
 using VTTranslate.App.Authentication;
 using VTTranslate.App.Devices;
@@ -125,6 +126,26 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     public bool IsSignedIn => AuthState == AuthenticationState.SignedIn;
     public bool IsSignedOut => !IsSignedIn;
 
+    // ---- Phase 7.3: "My Account" (subscription/entitlement/usage visibility) ----
+    // Owned here for lifetime purposes only — MainViewModel never reads or acts on
+    // any commercial state itself (docs §8/§16: this view-model must not become
+    // authoritative for anything). Created once an authenticated IAutraxisApiClient
+    // exists; discarded (Reset()) on sign-out so no account's data can ever survive
+    // into a different signed-in account (docs §16/§17).
+    private AccountViewModel? _account;
+    public AccountViewModel? Account { get => _account; private set { _account = value; Raise(); } }
+
+    private bool _isAccountViewOpen;
+    /// <summary>Gate: My Account is authenticated-only functionality (docs §16) — never openable while signed out.</summary>
+    public bool IsAccountViewOpen
+    {
+        get => _isAccountViewOpen && IsSignedIn;
+        set { _isAccountViewOpen = value && IsSignedIn; Raise(); }
+    }
+
+    public ICommand OpenAccountCommand { get; }
+    public ICommand CloseAccountCommand { get; }
+
     private string _accountStatusMessage = "";
     /// <summary>Generic, safe message only — never a specific account-status value (Pending/Suspended/Disabled/Closed are deliberately indistinguishable at the API boundary, docs §16/§19).</summary>
     public string AccountStatusMessage
@@ -198,6 +219,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
         ToggleMuteCommand = new RelayCommand(() => IsMicrophoneMuted = !IsMicrophoneMuted, () => IsRunning);
         SignInCommand = new RelayCommand(async () => await SignInAsync(), () => !IsSignedIn);
         SignOutCommand = new RelayCommand(async () => await SignOutAsync(), () => IsSignedIn);
+        OpenAccountCommand = new RelayCommand(async () =>
+        {
+            IsAccountViewOpen = true;
+            if (Account is not null) await Account.LoadAsync();
+        }, () => IsSignedIn && Account is not null);
+        CloseAccountCommand = new RelayCommand(() => IsAccountViewOpen = false, () => true);
 
         RefreshDevices();
     }
@@ -224,6 +251,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
             var msalProvider = await MsalTokenProvider.CreateAsync(_authOptions, cacheStore);
             _tokenProvider = msalProvider;
             _apiClient = new AutraxisApiClient(_httpClient, msalProvider, _authOptions);
+            // Phase 7.3: created once alongside the api client, not per sign-in — its
+            // state is discarded via Reset() on every sign-out (below) and
+            // IsAccountViewOpen is gated to IsSignedIn, so this instance existing before
+            // (or across) a sign-in/out cycle never exposes stale or cross-account data.
+            Account = new AccountViewModel(_apiClient, _diagnosticLogger);
             // Corrective patch (Phase 7.1 runtime-risk audit, Risk 2): persists and
             // reuses the server-issued Device.Id across process restarts instead of
             // registering a new one every launch — see DeviceRegistrationCoordinator's
@@ -274,6 +306,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
 
     private async Task SignOutAsync()
     {
+        // Phase 7.3: discard any loaded account/subscription/usage state and close the
+        // view FIRST — before anything else in this method awaits — so no window exists
+        // where a stale, now-signed-out (or about-to-be-different) account's commercial
+        // data could remain visible or be reused by a subsequent sign-in (docs §16/§17).
+        IsAccountViewOpen = false;
+        Account?.Reset();
+
         if (IsRunning) await StopAsync();
         if (_authService is not null) await _authService.SignOutAsync();
         // Corrective patch (Phase 7.1 runtime-risk audit, Risk 2): device identity is
@@ -324,6 +363,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
         (ToggleMuteCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (SignInCommand as RelayCommand)?.RaiseCanExecuteChanged();
         (SignOutCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        (OpenAccountCommand as RelayCommand)?.RaiseCanExecuteChanged();
     }
 
     private void RefreshDevices()
@@ -484,12 +524,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
         }
     }
 
-    private static string MapApiErrorToMessage(AutraxisApiException ex) => ex.Category switch
+    /// <summary>Public (not private) so it is directly unit-testable without constructing a full <see cref="MainViewModel"/> (which has environment/settings-file side effects) — same "expose a small pure function publicly rather than add InternalsVisibleTo" convention already established in Phase 7.2's <c>ProviderCredentialRenewalCoordinator.ComputeRenewalDelay</c>.</summary>
+    public static string MapApiErrorToMessage(AutraxisApiException ex) => ex.Category switch
     {
         ApiErrorCategory.AuthenticationRequired => "Please sign in again.",
         ApiErrorCategory.AccountNotUsable => "Your account isn't available right now.",
         ApiErrorCategory.DeviceNotAuthorized => "This device is not authorized. Check your device list.",
-        ApiErrorCategory.EntitlementDenied => "Your plan does not currently allow this.",
+        // Phase 7.3: points the customer toward "My Account" (now that it exists) rather
+        // than a dead-end generic string — deliberately does NOT claim a specific reason
+        // (usage exhausted vs. device limit vs. lapsed plan) since the backend error
+        // itself doesn't distinguish one (docs §14) — "My Account" is where the customer
+        // can actually see which of those applies.
+        ApiErrorCategory.EntitlementDenied => "Your plan does not currently allow this. Check My Account for your current plan and usage.",
         ApiErrorCategory.ProviderAccessDenied => "Translation service access was denied.",
         ApiErrorCategory.NetworkUnavailable or ApiErrorCategory.ServiceUnavailable => "Cannot reach the AUTRAXIS service right now.",
         _ => "Could not start the session.",

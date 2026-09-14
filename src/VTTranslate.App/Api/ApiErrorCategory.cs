@@ -21,6 +21,15 @@ public enum ApiErrorCategory
     ServiceUnavailable,
     BadRequest,
     Unknown,
+
+    /// <summary>
+    /// Phase 7.3 — the specific, backend-guaranteed <c>{ "status": "no_subscription" }</c>
+    /// 404 shape returned by <c>GET /subscription</c> and <c>GET /entitlements</c> only
+    /// (Program.cs, unchanged). Distinct from <see cref="BadRequest"/> (the generic 404
+    /// fallback) precisely because this one specific status string is a documented,
+    /// guaranteed contract — never inferred from an arbitrary 404 on any other endpoint.
+    /// </summary>
+    NoSubscription,
 }
 
 /// <summary>Carries a stable category (never raw exception text) plus the backend's own status string, if any, purely for internal diagnostics (never shown to the end user, never logged with token content — docs §25).</summary>

@@ -213,6 +213,13 @@ public sealed class DeviceIdentityPersistenceTests : IDisposable
         public Task<TranslationSessionStartedDto> StartTranslationSessionAsync(Guid deviceId, string? clientSessionId, string? direction, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<TranslationSessionOperationDto> HeartbeatTranslationSessionAsync(Guid sessionId, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<TranslationSessionOperationDto> EndTranslationSessionAsync(Guid sessionId, CancellationToken ct = default) => throw new NotSupportedException();
+
+        // Phase 7.3: mechanical interface-completeness additions only — this fake's
+        // purpose (device-registration-denial simulation) is unrelated to any of these.
+        public Task<SubscriptionDto> GetSubscriptionAsync(CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<EntitlementsDto> GetEntitlementsAsync(CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<UsageSummaryDto> GetUsageAsync(CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<CancelSubscriptionResultDto> CancelSubscriptionAsync(bool immediate, CancellationToken ct = default) => throw new NotSupportedException();
     }
 
     // ---- TEST 9: repeated invalid-device responses never loop ----

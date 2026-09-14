@@ -64,6 +64,19 @@ public sealed class AutraxisApiClient : IAutraxisApiClient
     public async Task<TranslationSessionOperationDto> EndTranslationSessionAsync(Guid sessionId, CancellationToken ct = default) =>
         await SendAsync<TranslationSessionOperationDto>(HttpMethod.Post, $"/translation-sessions/{sessionId}/end", body: null, ct) ?? throw EmptyResponse();
 
+    // ---- Phase 7.3: customer subscription/entitlement/usage visibility ----
+    public async Task<SubscriptionDto> GetSubscriptionAsync(CancellationToken ct = default) =>
+        await SendAsync<SubscriptionDto>(HttpMethod.Get, "/subscription", body: null, ct) ?? throw EmptyResponse();
+
+    public async Task<EntitlementsDto> GetEntitlementsAsync(CancellationToken ct = default) =>
+        await SendAsync<EntitlementsDto>(HttpMethod.Get, "/entitlements", body: null, ct) ?? throw EmptyResponse();
+
+    public async Task<UsageSummaryDto> GetUsageAsync(CancellationToken ct = default) =>
+        await SendAsync<UsageSummaryDto>(HttpMethod.Get, "/usage", body: null, ct) ?? throw EmptyResponse();
+
+    public async Task<CancelSubscriptionResultDto> CancelSubscriptionAsync(bool immediate, CancellationToken ct = default) =>
+        await SendAsync<CancelSubscriptionResultDto>(HttpMethod.Post, "/subscription/cancel", new { immediate }, ct) ?? throw EmptyResponse();
+
     private static AutraxisApiException EmptyResponse() => new(ApiErrorCategory.ServiceUnavailable, "empty_response");
 
     /// <summary>
@@ -155,6 +168,12 @@ public sealed class AutraxisApiClient : IAutraxisApiClient
                 HttpStatusCode.Forbidden when status is "account_not_found" or "account_suspended" => ApiErrorCategory.AccountNotUsable,
                 HttpStatusCode.Forbidden => ApiErrorCategory.ProviderAccessDenied,
                 HttpStatusCode.BadRequest => ApiErrorCategory.BadRequest,
+                // Phase 7.3: only this one specific, backend-guaranteed status string maps
+                // to NoSubscription (Program.cs's GET /subscription and GET /entitlements
+                // both return exactly { status: "no_subscription" } for this case, and no
+                // other endpoint returns this string) — every other 404 still falls through
+                // to the generic BadRequest mapping below, never inferred as "no subscription".
+                HttpStatusCode.NotFound when status == "no_subscription" => ApiErrorCategory.NoSubscription,
                 HttpStatusCode.NotFound => ApiErrorCategory.BadRequest,
                 HttpStatusCode.ServiceUnavailable => ApiErrorCategory.ServiceUnavailable,
                 >= HttpStatusCode.InternalServerError => ApiErrorCategory.ServiceUnavailable,

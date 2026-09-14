@@ -4,6 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:VTTranslate.App"
+        xmlns:account="clr-namespace:VTTranslate.App.Account"
         mc:Ignorable="d"
         Title="Voice-Translater — AUTRAXIS SYSTEMS INC." Height="720" Width="1080" MinHeight="560" MinWidth="820"
         Style="{StaticResource BrandWindowStyle}"
@@ -199,6 +200,10 @@
                             <TextBlock Text="{Binding AccountStatusMessage}" TextWrapping="Wrap" Foreground="{StaticResource BrandNavySoftBrush}" FontSize="12" />
                             <TextBlock Style="{StaticResource HintText}" Margin="0,8,0,0"
                                        Text="Translation service access is authorized through your AUTRAXIS account — sign in above to start a session." />
+                            <!-- Phase 7.3: subscription/entitlement/usage visibility — authenticated only. -->
+                            <Button Content="My Account" Command="{Binding OpenAccountCommand}" Style="{StaticResource SecondaryButton}"
+                                    Padding="12,6" Margin="0,10,0,0" HorizontalAlignment="Left"
+                                    Visibility="{Binding IsSignedIn, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" />
                         </StackPanel>
                     </Border>
 
@@ -322,6 +327,36 @@
                     </StackPanel>
                 </Border>
             </Grid>
+        </Grid>
+
+        <!-- ============ Phase 7.3: "My Account" overlay ============
+             Same single-window shell (no second top-level window, no new navigation
+             framework) — a toggled overlay panel over the existing body, exactly like
+             the existing modal-ish patterns already in this shell. Only ever visible
+             while signed in (IsAccountViewOpen already gates on IsSignedIn in the
+             view-model), so it can never display anything to a signed-out user. -->
+        <Grid Grid.Row="0" Grid.RowSpan="2" Background="#66000000"
+              Visibility="{Binding IsAccountViewOpen, Converter={x:Static local:BoolToVisibilityConverter.Instance}}">
+            <Border Background="{StaticResource BrandSurfaceBrush}" BorderBrush="{StaticResource BrandBorderBrush}"
+                    BorderThickness="1" CornerRadius="6" Width="480" MaxHeight="640"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" Padding="0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" BorderBrush="{StaticResource BrandBorderBrush}" BorderThickness="0,0,0,1" Padding="16,12">
+                        <Grid>
+                            <TextBlock Text="My Account" FontSize="16" FontWeight="Bold" Foreground="{StaticResource BrandNavyBrush}" />
+                            <Button Content="✕" Command="{Binding CloseAccountCommand}" Style="{StaticResource SecondaryButton}"
+                                    Padding="8,2" HorizontalAlignment="Right" />
+                        </Grid>
+                    </Border>
+
+                    <account:AccountView Grid.Row="1" DataContext="{Binding Account}" Margin="16" />
+                </Grid>
+            </Border>
         </Grid>
     </Grid>
 </Window>

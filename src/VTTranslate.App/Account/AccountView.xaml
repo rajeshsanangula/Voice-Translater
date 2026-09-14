@@ -1,0 +1,108 @@
+<UserControl x:Class="VTTranslate.App.Account.AccountView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:local="clr-namespace:VTTranslate.App"
+             mc:Ignorable="d"
+             d:DesignHeight="600" d:DesignWidth="480">
+
+    <!-- Phase 7.3 — "My Account": subscription status/plan/period, usage-vs-limit, and
+         self-service cancellation. Reuses the exact AUTRAXIS brand resources (CardBorder,
+         SectionHeaderText, HintText, PrimaryButton/SecondaryButton, status brushes) already
+         defined in Themes/BrandTheme.xaml — no new visual style is introduced. Never
+         displays Azure/Gemini/provider identifiers, tokens, or internal backend IDs beyond
+         the plan GUID the backend contract itself returns (see AccountViewModel's own doc
+         comment for why a friendly plan name isn't available). -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="4">
+
+            <!-- ============ Subscription ============ -->
+            <Border Style="{StaticResource CardBorder}">
+                <StackPanel>
+                    <TextBlock Text="Subscription" Style="{StaticResource SectionHeaderText}" />
+
+                    <TextBlock Text="Loading…" Style="{StaticResource HintText}"
+                               Visibility="{Binding IsLoadingSubscription, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" />
+
+                    <StackPanel Visibility="{Binding SubscriptionLoadError, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}">
+                        <TextBlock Text="{Binding SubscriptionLoadError}" Foreground="{StaticResource StatusErrorBrush}" TextWrapping="Wrap" FontWeight="SemiBold" />
+                        <Button Content="Retry" Command="{Binding LoadCommand}" Style="{StaticResource SecondaryButton}"
+                                Padding="10,4" Margin="0,6,0,0" HorizontalAlignment="Left" />
+                    </StackPanel>
+
+                    <!-- No subscription row exists yet — a valid state, not an error. -->
+                    <TextBlock Text="No active subscription on this account." Style="{StaticResource HintText}"
+                               Visibility="{Binding NoSubscriptionMessageVisible, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" />
+
+                    <StackPanel Visibility="{Binding HasSubscription, Converter={x:Static local:BoolToVisibilityConverter.Instance}}">
+                        <TextBlock Text="Status" Style="{StaticResource FieldLabelText}" Margin="0,8,0,0" />
+                        <TextBlock Text="{Binding SubscriptionStatusDisplay}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}" />
+
+                        <TextBlock Text="Plan" Style="{StaticResource FieldLabelText}" Margin="0,8,0,0" />
+                        <TextBlock Text="{Binding PlanDisplay}" FontSize="11" Foreground="{StaticResource BrandGraySubtleBrush}" TextWrapping="Wrap" />
+
+                        <TextBlock Text="Current period" Style="{StaticResource FieldLabelText}" Margin="0,8,0,0" />
+                        <TextBlock Text="{Binding CurrentPeriodDisplay}" Foreground="{StaticResource BrandNavySoftBrush}" />
+
+                        <TextBlock Text="Your subscription will end at the close of the current period."
+                                   Style="{StaticResource HintText}" Margin="0,8,0,0" TextWrapping="Wrap"
+                                   Foreground="{StaticResource StatusWarnBrush}"
+                                   Visibility="{Binding CancelAtPeriodEnd, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" />
+
+                        <!-- Cancellation -->
+                        <Button Content="Cancel Subscription" Command="{Binding RequestCancelCommand}"
+                                Style="{StaticResource SecondaryButton}" Padding="12,6" Margin="0,14,0,0" HorizontalAlignment="Left" />
+
+                        <Border Background="{StaticResource BrandBackgroundBrush}" CornerRadius="4" Padding="12" Margin="0,10,0,0"
+                                Visibility="{Binding ShowCancelConfirmation, Converter={x:Static local:BoolToVisibilityConverter.Instance}}">
+                            <StackPanel>
+                                <TextBlock Text="Are you sure you want to cancel?" FontWeight="SemiBold"
+                                           Foreground="{StaticResource BrandNavyBrush}" TextWrapping="Wrap" />
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                    <Button Content="Cancel at period end" Command="{Binding ConfirmCancelAtPeriodEndCommand}"
+                                            Style="{StaticResource SecondaryButton}" Padding="10,5" Margin="0,0,8,0" />
+                                    <Button Content="Cancel immediately" Command="{Binding ConfirmCancelImmediatelyCommand}"
+                                            Style="{StaticResource SecondaryButton}" Padding="10,5" Margin="0,0,8,0" />
+                                    <Button Content="Never mind" Command="{Binding DismissCancelConfirmationCommand}"
+                                            Style="{StaticResource SecondaryButton}" Padding="10,5" />
+                                </StackPanel>
+                                <TextBlock Text="Working…" Style="{StaticResource HintText}" Margin="0,8,0,0"
+                                           Visibility="{Binding IsCancelling, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" />
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Text="{Binding CancelError}" Foreground="{StaticResource StatusErrorBrush}" TextWrapping="Wrap"
+                                   FontWeight="SemiBold" Margin="0,8,0,0"
+                                   Visibility="{Binding CancelError, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- ============ Usage ============ -->
+            <Border Style="{StaticResource CardBorder}">
+                <StackPanel>
+                    <TextBlock Text="Usage this period" Style="{StaticResource SectionHeaderText}" />
+
+                    <TextBlock Text="Loading…" Style="{StaticResource HintText}"
+                               Visibility="{Binding IsLoadingUsage, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" />
+
+                    <StackPanel Visibility="{Binding UsageLoadError, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}">
+                        <TextBlock Text="{Binding UsageLoadError}" Foreground="{StaticResource StatusErrorBrush}" TextWrapping="Wrap" FontWeight="SemiBold" />
+                        <Button Content="Retry" Command="{Binding LoadCommand}" Style="{StaticResource SecondaryButton}"
+                                Padding="10,4" Margin="0,6,0,0" HorizontalAlignment="Left" />
+                    </StackPanel>
+
+                    <TextBlock Text="{Binding UsageDisplay}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}"
+                               Margin="0,4,0,0"
+                               Visibility="{Binding UsageDisplay, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
+
+                    <TextBlock Text="{Binding EntitlementsLoadError}" Foreground="{StaticResource StatusErrorBrush}" TextWrapping="Wrap"
+                               Margin="0,6,0,0"
+                               Visibility="{Binding EntitlementsLoadError, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
