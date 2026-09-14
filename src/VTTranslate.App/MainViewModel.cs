@@ -374,6 +374,20 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
         OutputDevices.Clear();
         foreach (var d in AudioDeviceCatalog.GetOutputDevices()) OutputDevices.Add(d);
 
+        // MVP simple-mode default: a microphone/German-output the user has NEVER
+        // explicitly chosen defaults to Windows' own default capture/render device —
+        // reusing AudioDeviceCatalog's existing default-lookup, no duplicated device
+        // logic. An explicit prior choice (even one that's since become unavailable)
+        // is never silently overwritten here — SessionValidator still reports that as
+        // an error so the user consciously reconnects/reselects, matching existing
+        // behavior. Remote/meeting-mode fields (loopback input, English output) are
+        // deliberately NOT defaulted — they remain opt-in, advanced-mode selections
+        // (docs: MVP simple vs. meeting mode).
+        if (string.IsNullOrWhiteSpace(Settings.MicrophoneDeviceId))
+            Settings.MicrophoneDeviceId = AudioDeviceCatalog.GetDefaultInputDeviceId();
+        if (string.IsNullOrWhiteSpace(Settings.GermanOutputDeviceId))
+            Settings.GermanOutputDeviceId = AudioDeviceCatalog.GetDefaultOutputDeviceId();
+
         Raise(nameof(SelectedMicrophone));
         Raise(nameof(SelectedRemoteInput));
         Raise(nameof(SelectedEnglishOutput));
@@ -470,38 +484,49 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
             _micToGermanRenewal = new ProviderCredentialRenewalCoordinator(
                 _apiClient, micResult.Provider, deviceId, "AzureSpeech", "SpeechRecognition", "EN→DE", _diagnosticLogger);
 
-            var remoteToEnglishSession = new Core.Session.TranslationSession
-            {
-                Direction = SessionDirection.GermanRemoteToEnglish,
-                SourceLanguage = "de-DE",
-                TargetLanguage = "en-US"
-            };
-            var (remoteResult, deviceIdAfterRemote) = await _deviceCoordinator.ExecuteWithDeviceRecoveryAsync(
-                deviceId, id => CreateAuthenticatedProviderAsync(id, "en-US-JennyNeural", _cts.Token), _cts.Token);
-            _remoteToEnglish = new DirectionPipeline(
-                remoteToEnglishSession,
-                new AudioCaptureSource(Settings.RemoteAudioInputDeviceId!, CaptureKind.SystemLoopback),
-                new AudioPlaybackSink(Settings.EnglishOutputDeviceId!),
-                remoteResult.Provider);
-            _remoteToEnglishRenewal = new ProviderCredentialRenewalCoordinator(
-                _apiClient, remoteResult.Provider, deviceIdAfterRemote, "AzureSpeech", "SpeechRecognition", "DE→EN", _diagnosticLogger);
-
             HookTranscript(_micToGerman, "EN→DE");
-            HookTranscript(_remoteToEnglish, "DE→EN");
             HookErrors(_micToGerman);
-            HookErrors(_remoteToEnglish);
             HookStatus(_micToGerman);
-            HookStatus(_remoteToEnglish);
+
+            // MVP simple mode: the remote/meeting (DE->EN loopback) direction is
+            // entirely OPTIONAL — only started when the user has explicitly configured
+            // a remote audio input (SessionValidator already guarantees English output
+            // is also set whenever this is). A basic mic-to-speaker session never
+            // touches this direction at all — no VB-CABLE/loopback understanding
+            // required, no second provider-access/renewal call made for it.
+            var remoteModeEnabled = !string.IsNullOrWhiteSpace(Settings.RemoteAudioInputDeviceId);
+            if (remoteModeEnabled)
+            {
+                var remoteToEnglishSession = new Core.Session.TranslationSession
+                {
+                    Direction = SessionDirection.GermanRemoteToEnglish,
+                    SourceLanguage = "de-DE",
+                    TargetLanguage = "en-US"
+                };
+                var (remoteResult, deviceIdAfterRemote) = await _deviceCoordinator.ExecuteWithDeviceRecoveryAsync(
+                    deviceId, id => CreateAuthenticatedProviderAsync(id, "en-US-JennyNeural", _cts.Token), _cts.Token);
+                _remoteToEnglish = new DirectionPipeline(
+                    remoteToEnglishSession,
+                    new AudioCaptureSource(Settings.RemoteAudioInputDeviceId!, CaptureKind.SystemLoopback),
+                    new AudioPlaybackSink(Settings.EnglishOutputDeviceId!),
+                    remoteResult.Provider);
+                _remoteToEnglishRenewal = new ProviderCredentialRenewalCoordinator(
+                    _apiClient, remoteResult.Provider, deviceIdAfterRemote, "AzureSpeech", "SpeechRecognition", "DE→EN", _diagnosticLogger);
+
+                HookTranscript(_remoteToEnglish, "DE→EN");
+                HookErrors(_remoteToEnglish);
+                HookStatus(_remoteToEnglish);
+
+                await _remoteToEnglish.StartAsync(_cts.Token);
+                _remoteToEnglishRenewal.Start(remoteResult.Grant.ExpiresAt, _cts.Token);
+            }
 
             await _micToGerman.StartAsync(_cts.Token);
-            await _remoteToEnglish.StartAsync(_cts.Token);
 
-            // Phase 7.2: begin proactive credential renewal for each direction only
-            // once its own recognizer is actually running — linked to the SAME
-            // session-lifetime token (_cts) that governs Stop()/cancellation for
-            // everything else in this session, so Stop() always wins here too.
+            // Phase 7.2: begin proactive credential renewal only once the recognizer is
+            // actually running — linked to the SAME session-lifetime token (_cts) that
+            // governs Stop()/cancellation for everything else, so Stop() always wins.
             _micToGermanRenewal.Start(micResult.Grant.ExpiresAt, _cts.Token);
-            _remoteToEnglishRenewal.Start(remoteResult.Grant.ExpiresAt, _cts.Token);
 
             IsRunning = true;
             Status = "Running";

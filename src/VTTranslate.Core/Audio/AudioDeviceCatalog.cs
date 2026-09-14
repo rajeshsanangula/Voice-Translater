@@ -40,6 +40,25 @@ public static class AudioDeviceCatalog
     }
 
     /// <summary>
+    /// MVP simple-mode support: the Windows default capture device's ID (same lookup
+    /// already used internally to mark <see cref="AudioDeviceInfo.IsDefault"/> — no
+    /// duplicated device logic). Null only if Windows has no default capture device
+    /// configured at all.
+    /// </summary>
+    public static string? GetDefaultInputDeviceId()
+    {
+        using var enumerator = new MMDeviceEnumerator();
+        return TryGetDefaultId(enumerator, DataFlow.Capture);
+    }
+
+    /// <summary>MVP simple-mode support: the Windows default render device's ID — see <see cref="GetDefaultInputDeviceId"/>.</summary>
+    public static string? GetDefaultOutputDeviceId()
+    {
+        using var enumerator = new MMDeviceEnumerator();
+        return TryGetDefaultId(enumerator, DataFlow.Render);
+    }
+
+    /// <summary>
     /// Best-effort classification from the device's friendly name. WASAPI endpoint IDs
     /// don't cleanly expose bus type through NAudio's public surface, so this is a
     /// heuristic (documented as such), not a hardware-ID query — good enough to help a
