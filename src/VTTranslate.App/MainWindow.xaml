@@ -207,10 +207,20 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Device configuration -->
+                    <!-- Device configuration — Phase 8C: explicitly split into "Basic" (always
+                         used, defaults to Windows' own default mic/speaker, no VB-CABLE needed)
+                         and "Meeting / Remote Audio" (optional — only activates the DE->EN
+                         direction, and only when Remote/System Audio is actually set) so a
+                         user testing the basic path is never tempted to fill in fields that
+                         silently turn on a second, more advanced mode. -->
                     <Border Style="{StaticResource CardBorder}">
                         <StackPanel>
                             <TextBlock Text="Audio Devices" Style="{StaticResource SectionHeaderText}" />
+
+                            <TextBlock Text="BASIC — English microphone → German output" FontSize="11" FontWeight="SemiBold"
+                                       Foreground="{StaticResource BrandGraySubtleBrush}" Margin="0,0,0,6" />
+                            <TextBlock Style="{StaticResource HintText}" Margin="0,0,0,8" TextWrapping="Wrap"
+                                       Text="Required for every session. Defaults to your Windows default microphone/speaker automatically — no VB-CABLE needed for this." />
 
                             <TextBlock Text="Microphone" Style="{StaticResource FieldLabelText}" />
                             <TextBlock Text="Captures your spoken English." Style="{StaticResource HintText}" Margin="0,0,0,3" />
@@ -223,10 +233,35 @@
                                 </ComboBox.ItemTemplate>
                             </ComboBox>
 
+                            <TextBlock Text="German Output" Style="{StaticResource FieldLabelText}" />
+                            <TextBlock Text="Where the English→German translation is sent — a speaker for basic testing, or typically a virtual microphone (e.g. VB-CABLE) for meeting use." Style="{StaticResource HintText}" Margin="0,0,0,3" TextWrapping="Wrap" />
+                            <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedGermanOutput}"
+                                      ToolTip="A virtual audio cable input (e.g. VB-CABLE) that your meeting app uses as its microphone, or a speaker.">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Name}" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <Border Height="1" Background="{StaticResource BrandBorderBrush}" Margin="0,14,0,12" />
+
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,0">
+                                <TextBlock Text="MEETING / REMOTE AUDIO — optional, German → English" FontSize="11" FontWeight="SemiBold"
+                                           Foreground="{StaticResource BrandGraySubtleBrush}" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Style="{StaticResource HintText}" Margin="0,2,0,8" TextWrapping="Wrap"
+                                       Text="Leave Remote/System Audio blank to skip this direction entirely — it is never required for basic microphone translation. Setting it activates meeting mode and then also requires English Output." />
+                            <Border Background="{StaticResource BrandBackgroundBrush}" CornerRadius="4" Padding="8,4" Margin="0,0,0,8"
+                                    Visibility="{Binding IsRemoteModeActive, Converter={x:Static local:BoolToVisibilityConverter.Instance}}">
+                                <TextBlock Text="Meeting mode is ON — this session will also run German → English from Remote/System Audio." FontSize="11" FontWeight="SemiBold"
+                                           Foreground="{StaticResource BrandNavyBrush}" TextWrapping="Wrap" />
+                            </Border>
+
                             <TextBlock Text="Remote / System Audio" Style="{StaticResource FieldLabelText}" />
-                            <TextBlock Text="Loopback source carrying the other participant's German speech." Style="{StaticResource HintText}" Margin="0,0,0,3" />
+                            <TextBlock Text="Loopback source carrying the other participant's German speech. Leave unset for basic mode." Style="{StaticResource HintText}" Margin="0,0,0,3" TextWrapping="Wrap" />
                             <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedRemoteInput}"
-                                      ToolTip="The playback device to capture as a loopback source (e.g. the meeting app's output) for incoming German speech.">
+                                      ToolTip="Optional. The playback device to capture as a loopback source (e.g. the meeting app's output) for incoming German speech — only needed for meeting mode.">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding Name}" />
@@ -235,20 +270,9 @@
                             </ComboBox>
 
                             <TextBlock Text="English Output" Style="{StaticResource FieldLabelText}" />
-                            <TextBlock Text="Where the German→English translation is spoken to you." Style="{StaticResource HintText}" Margin="0,0,0,3" />
+                            <TextBlock Text="Where the German→English translation is spoken to you. Only used when meeting mode is on." Style="{StaticResource HintText}" Margin="0,0,0,3" TextWrapping="Wrap" />
                             <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedEnglishOutput}"
-                                      ToolTip="Your headphones or speakers — where you hear the English translation.">
-                                <ComboBox.ItemTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding Name}" />
-                                    </DataTemplate>
-                                </ComboBox.ItemTemplate>
-                            </ComboBox>
-
-                            <TextBlock Text="German Output" Style="{StaticResource FieldLabelText}" />
-                            <TextBlock Text="Where the English→German translation is sent — typically a virtual microphone." Style="{StaticResource HintText}" Margin="0,0,0,3" />
-                            <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedGermanOutput}"
-                                      ToolTip="A virtual audio cable input (e.g. VB-CABLE) that your meeting app uses as its microphone, or a speaker.">
+                                      ToolTip="Optional. Your headphones or speakers — where you hear the English translation — only needed for meeting mode.">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding Name}" />

@@ -22,9 +22,17 @@ public static class SessionValidator
     {
         var issues = new List<ValidationIssue>();
 
-        if (!settings.IsProviderConfigured)
-            issues.Add(new ValidationIssue(ValidationSeverity.Error,
-                "Azure Speech key/region not configured. Set AZURE_SPEECH_KEY and AZURE_SPEECH_REGION environment variables, then restart."));
+        // Phase 8C: the production authenticated path (MainViewModel.CreateAuthenticatedProviderAsync
+        // -> RequestProviderAccessAsync -> AzureSpeechTranslationProvider.FromAuthorizationToken)
+        // obtains its Azure Speech credential from the AUTRAXIS backend via /provider-access
+        // (Phase 6.8) — it never reads Settings.AzureSpeechKey/AzureSpeechRegion. Requiring
+        // those local environment variables here was a stale, pre-Phase-7.1 check left over
+        // from before the customer app was migrated off direct provider credentials; it no
+        // longer reflects anything the session-start path actually consumes, so it must not
+        // block Start. AppSettings.AzureSpeechKey/AzureSpeechRegion/IsProviderConfigured
+        // themselves are left untouched — still used by non-production experimental/live-test
+        // code (VTTranslate.Core.Tests, tools/VTTranslate.LiveTest, Core/Streaming) that
+        // legitimately talks to Azure directly outside the authenticated customer path.
 
         // MVP simple mode: only the microphone and its German-translation output are
         // always required — a basic "speak into the mic, hear the translation" session

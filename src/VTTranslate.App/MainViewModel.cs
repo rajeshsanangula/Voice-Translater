@@ -169,8 +169,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     public AudioDeviceInfo? SelectedRemoteInput
     {
         get => OutputDevices.FirstOrDefault(d => d.Id == Settings.RemoteAudioInputDeviceId);
-        set { Settings.RemoteAudioInputDeviceId = value?.Id; Raise(); }
+        set { Settings.RemoteAudioInputDeviceId = value?.Id; Raise(); Raise(nameof(IsRemoteModeActive)); }
     }
+
+    /// <summary>
+    /// Phase 8C — UX-only indicator (no behavior change): true exactly when this
+    /// session would run the optional Remote/Meeting (DE→EN) direction, mirroring
+    /// the same condition MainViewModel.StartAsync and SessionValidator already use
+    /// (Settings.RemoteAudioInputDeviceId non-empty). Lets the UI show the user
+    /// whether they've activated meeting mode, without them needing to infer it from
+    /// which fields happen to be filled in.
+    /// </summary>
+    public bool IsRemoteModeActive => !string.IsNullOrWhiteSpace(Settings.RemoteAudioInputDeviceId);
 
     public AudioDeviceInfo? SelectedEnglishOutput
     {
@@ -392,6 +402,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
         Raise(nameof(SelectedRemoteInput));
         Raise(nameof(SelectedEnglishOutput));
         Raise(nameof(SelectedGermanOutput));
+        Raise(nameof(IsRemoteModeActive));
     }
 
     /// <summary>
