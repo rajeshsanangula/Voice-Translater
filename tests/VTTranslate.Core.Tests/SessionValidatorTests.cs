@@ -44,11 +44,12 @@ public class SessionValidatorTests
 
     [Theory]
     [InlineData(nameof(AppSettings.MicrophoneDeviceId))]
-    [InlineData(nameof(AppSettings.RemoteAudioInputDeviceId))]
-    [InlineData(nameof(AppSettings.EnglishOutputDeviceId))]
     [InlineData(nameof(AppSettings.GermanOutputDeviceId))]
-    public void Validate_ReturnsError_WhenAnyDeviceMissing(string propertyName)
+    public void Validate_ReturnsError_WhenAnAlwaysRequiredDeviceIsMissing(string propertyName)
     {
+        // MVP simple mode: microphone and German output (the basic mic-to-speaker
+        // translation direction) are always required — unlike the meeting-mode fields
+        // below, there is no way to run any session at all without these two.
         using var _ = ConfigureValidProvider();
         var s = ValidSettings();
         typeof(AppSettings).GetProperty(propertyName)!.SetValue(s, null);
@@ -57,6 +58,56 @@ public class SessionValidatorTests
 
         Assert.True(SessionValidator.HasErrors(issues));
         Assert.Contains(issues, i => i.Severity == ValidationSeverity.Error && i.Message.Contains("No "));
+    }
+
+    [Fact]
+    public void Validate_ReturnsNoIssues_WhenRemoteModeFieldsAreUnset_BasicMicOnlySessionIsValid()
+    {
+        // The core MVP fix: a first-run user with only a microphone and German output
+        // configured (Windows-default-populated, never touching VB-CABLE/meeting
+        // concepts) must be able to start a session — this was previously blocked
+        // because RemoteAudioInputDeviceId/EnglishOutputDeviceId were unconditionally
+        // required even though MainViewModel.StartAsync never even constructs the
+        // remote/meeting DirectionPipeline unless RemoteAudioInputDeviceId is set.
+        using var _ = ConfigureValidProvider();
+        var s = ValidSettings();
+        s.RemoteAudioInputDeviceId = null;
+        s.EnglishOutputDeviceId = null;
+
+        var issues = Validate(s);
+
+        Assert.Empty(issues);
+    }
+
+    [Fact]
+    public void Validate_ReturnsError_WhenRemoteModeIsActiveButEnglishOutputIsMissing()
+    {
+        // Once the user opts INTO remote/meeting mode (sets a loopback source), the
+        // English output it needs somewhere to play to becomes required again — this
+        // is the one meeting-mode field that stays conditionally mandatory.
+        using var _ = ConfigureValidProvider();
+        var s = ValidSettings();
+        s.EnglishOutputDeviceId = null; // RemoteAudioInputDeviceId stays set from ValidSettings()
+
+        var issues = Validate(s);
+
+        Assert.True(SessionValidator.HasErrors(issues));
+        Assert.Contains(issues, i => i.Severity == ValidationSeverity.Error && i.Message.Contains("English output"));
+    }
+
+    [Fact]
+    public void Validate_ReturnsError_WhenRemoteModeIsActiveButTheLoopbackDeviceIsUnavailable()
+    {
+        // Remote mode being "on" (RemoteAudioInputDeviceId set) still requires that
+        // device to actually be present, same as before this change.
+        using var _ = ConfigureValidProvider();
+        var s = ValidSettings();
+        s.RemoteAudioInputDeviceId = "loopback-does-not-exist";
+
+        var issues = Validate(s);
+
+        Assert.True(SessionValidator.HasErrors(issues));
+        Assert.Contains(issues, i => i.Severity == ValidationSeverity.Error && i.Message.Contains("no longer available"));
     }
 
     [Theory]

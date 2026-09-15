@@ -26,10 +26,23 @@ public static class SessionValidator
             issues.Add(new ValidationIssue(ValidationSeverity.Error,
                 "Azure Speech key/region not configured. Set AZURE_SPEECH_KEY and AZURE_SPEECH_REGION environment variables, then restart."));
 
+        // MVP simple mode: only the microphone and its German-translation output are
+        // always required — a basic "speak into the mic, hear the translation" session
+        // needs nothing else and must not be blocked by unset meeting-mode fields.
         CheckDevice(issues, settings.MicrophoneDeviceId, "microphone", availableInputDeviceIds);
-        CheckDevice(issues, settings.RemoteAudioInputDeviceId, "remote audio input (loopback source)", availableOutputDeviceIds);
-        CheckDevice(issues, settings.EnglishOutputDeviceId, "English output", availableOutputDeviceIds);
         CheckDevice(issues, settings.GermanOutputDeviceId, "German output", availableOutputDeviceIds);
+
+        // Remote/meeting mode (the DE->EN loopback direction) is OPTIONAL — activated
+        // only when the user has explicitly configured a remote audio input (loopback
+        // source), e.g. for VB-CABLE/meeting routing. When it's off, DirectionPipeline
+        // for that direction is never constructed (MainViewModel.StartAsync), so an
+        // unset English output is correctly irrelevant, not an error.
+        var remoteModeRequested = !string.IsNullOrWhiteSpace(settings.RemoteAudioInputDeviceId);
+        if (remoteModeRequested)
+        {
+            CheckDevice(issues, settings.RemoteAudioInputDeviceId, "remote audio input (loopback source)", availableOutputDeviceIds);
+            CheckDevice(issues, settings.EnglishOutputDeviceId, "English output", availableOutputDeviceIds);
+        }
 
         if (HasAllFourDevices(settings))
         {
