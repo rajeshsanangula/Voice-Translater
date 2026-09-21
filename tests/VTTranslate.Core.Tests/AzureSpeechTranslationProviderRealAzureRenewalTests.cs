@@ -59,7 +59,7 @@ public class AzureSpeechTranslationProviderRealAzureRenewalTests
         }
     }
 
-    [SkipIfNoAzureSpeechCredentialsFact]
+    [SkipIfNoAzureSpeechCredentialsFact("test-results/input-audio/test_f_long_de.wav")]
     public async Task ProductionProvider_TryUpdateAuthorizationTokenAsync_ContinuesRecognitionOnTheSameRecognizer_AgainstRealAzure()
     {
         var region = Environment.GetEnvironmentVariable("AZURE_SPEECH_REGION")!;

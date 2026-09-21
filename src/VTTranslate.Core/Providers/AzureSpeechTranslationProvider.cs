@@ -96,8 +96,35 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
     private string? _previousPartialTranslatedText;
     private int _partialRevisionCount;
     private int _translatedPartialMissingCount;
+    // Phase 15B — narrower than _partialRevisionCount above (which flags ANY non-append
+    // change, e.g. a same-length wording correction). This counts only the specific case
+    // Phase 15A's real physical session couldn't distinguish from existing logs: a later
+    // partial's SOURCE TEXT LENGTH actually shrinking versus the immediately preceding
+    // partial. Lengths only, via PartialLengthRegressionAnalyzer — never text content.
+    private int _partialLengthRegressionCount;
+    private int _maxPartialLengthRegressionMagnitude;
     private DateTimeOffset _t0ForPendingSynthesisTiming; // snapshot of T0 taken at Final, consumed by the next Synthesizing
     private bool _firstSynthesisLoggedForUtterance = true; // true = "nothing pending to log yet"
+
+    // Phase 20 — bundled-TTS observability baseline. OBSERVATION ONLY: these fields feed log lines
+    // (timestamps, counts, byte totals — never text or audio content) and are never read by control
+    // flow. All are guarded by _instrumentationLock.
+    private DateTimeOffset _finalReceivedAt;       // when the pending utterance's Final result arrived (T3)
+    private int _finalSequence;                    // count of Final results in this provider's life (log correlation only)
+    private bool _summaryPending;                  // a Final has been received and its synthesis summary not yet logged
+    private bool _pendingAccepted;                 // eligibility decision of the pending utterance
+    private int _synthChunks;
+    private long _synthBytes;
+    private long _suppressedBytes;                 // bytes Azure synthesized that were NOT forwarded (rejected utterance)
+    private DateTimeOffset? _firstSynthAt;
+    private DateTimeOffset? _lastSynthAt;
+    private bool _watchdogFiredForPending;         // TtsMissing was logged for the pending utterance
+
+    // Phase 21 — stage-timing observability (observation only; never read by control flow). Stream position of the audio
+    // pushed into the current recognizer generation's input stream (16 kHz mono 16-bit ⇒ 32 bytes/ms), so recognition
+    // events can be located on the audio timeline (speech onset / end reported by Azure vs how much audio had been fed).
+    private long _pushedBytes;
+    private long _firstPushTicks;                  // UTC ticks of the first chunk pushed in this generation (0 = none yet)
 
     /// <summary>Direction/session tag for log lines only — e.g. "en-US-&gt;de-DE". Never used for control flow.</summary>
     private string SessionTag => $"{_sourceLanguage}->{_targetLanguage}";
@@ -275,6 +302,8 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
         DisposeRecognizerLocked();
         var recognizer = new TranslationRecognizer(config, audioConfig);
         var myGeneration = Interlocked.Increment(ref _generation);
+        lock (_instrumentationLock) FlushSynthesisSummaryLocked("generationChange"); // Phase 20: observation only
+        Interlocked.Exchange(ref _pushedBytes, 0); Interlocked.Exchange(ref _firstPushTicks, 0); // Phase 21: new stream ⇒ new audio timeline (observation only)
 
         // ---- Step 3/4 shadow stability observation (diagnostic/measurement only) ----
         // One CommitPolicyComparator (running Policy A = PrefixStabilityEngine, unmodified,
@@ -300,7 +329,11 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
 
         recognizer.Recognizing += (_, e) =>
         {
-            if (myGeneration != _generation) return; // superseded by a later (re)connect — drop, don't duplicate
+            if (myGeneration != _generation)
+            {
+                _logger.Log(SessionTag, "StaleGenerationDrop", $"kind=partial generation={myGeneration} current={_generation}"); // Phase 20: observation only
+                return; // superseded by a later (re)connect — drop, don't duplicate
+            }
             // Log only that a recognition event happened and its text LENGTH — never the
             // recognized/translated text itself (that's sensitive speech content).
             _logger.Log(SessionTag, "RecognitionEvent", $"kind=partial generation={myGeneration} textLength={e.Result.Text.Length}");
@@ -319,11 +352,25 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
                 if (textCmp.Regressed) _partialRevisionCount++;
                 if (!translatedAvailable) _translatedPartialMissingCount++;
 
+                // Phase 15B: lengths only, never text — see PartialLengthRegressionAnalyzer's
+                // doc comment for why this is a stricter/different signal than textCmp.Regressed.
+                var lengthRegression = PartialLengthRegressionAnalyzer.Check(_previousPartialText?.Length, e.Result.Text.Length);
+                if (lengthRegression.IsRegression)
+                {
+                    _partialLengthRegressionCount++;
+                    if (lengthRegression.MagnitudeChars > _maxPartialLengthRegressionMagnitude)
+                        _maxPartialLengthRegressionMagnitude = lengthRegression.MagnitudeChars;
+                }
+
                 _logger.Log(SessionTag, "PartialMeasurement",
                     $"sequence={seq} elapsedFromT0Ms={elapsedFromT0Ms:F0} textLength={e.Result.Text.Length} " +
                     $"translatedLength={translated.Length} translatedAvailable={translatedAvailable} " +
                     $"isPrefixExtension={textCmp.IsPrefixExtension} unchanged={textCmp.Unchanged} regressed={textCmp.Regressed} " +
-                    $"translatedIsPrefixExtension={translatedCmp.IsPrefixExtension} translatedUnchanged={translatedCmp.Unchanged} translatedRegressed={translatedCmp.Regressed}");
+                    $"translatedIsPrefixExtension={translatedCmp.IsPrefixExtension} translatedUnchanged={translatedCmp.Unchanged} translatedRegressed={translatedCmp.Regressed} " +
+                    $"lengthRegressed={lengthRegression.IsRegression} lengthRegressionMagnitude={lengthRegression.MagnitudeChars} " +
+                    // Phase 21 (observation only): where this partial sits on the audio timeline.
+                    $"resultOffsetMs={e.Result.OffsetInTicks / 10000.0:F0} resultDurationMs={e.Result.Duration.TotalMilliseconds:F0} " +
+                    $"pushedAudioMs={Interlocked.Read(ref _pushedBytes) / 32.0:F0}");
 
                 _previousPartialText = e.Result.Text;
                 _previousPartialTranslatedText = translated;
@@ -355,8 +402,27 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
 
         recognizer.Recognized += (_, e) =>
         {
-            if (myGeneration != _generation) return;
-            if (e.Result.Reason != ResultReason.TranslatedSpeech) return;
+            if (myGeneration != _generation)
+            {
+                _logger.Log(SessionTag, "StaleGenerationDrop", $"kind=final generation={myGeneration} current={_generation}"); // Phase 20: observation only
+                return;
+            }
+            if (e.Result.Reason != ResultReason.TranslatedSpeech)
+            {
+                // Phase 14B — observability-only addition. Prior to this, a Recognized
+                // event with any reason other than TranslatedSpeech (e.g. NoMatch) was
+                // silently dropped here with no diagnostic trace at all (confirmed during
+                // Phase 14A's investigation, where only a tool-only raw-event harness that
+                // bypasses this class entirely could observe it). This does NOT change
+                // that behavior — the result is still never forwarded as FinalResult and
+                // never reaches translation/TTS/playback — it only makes the occurrence
+                // observable. Metadata only, via the pure, unit-tested formatter below;
+                // never the recognized/translated text.
+                var nonFinalDetail = RecognitionResultObservability.DescribeNonFinalReason(e.Result.Reason, e.Result.Duration, e.Result.OffsetInTicks);
+                if (nonFinalDetail is not null)
+                    _logger.Log(SessionTag, "RecognizedNonFinal", $"generation={myGeneration} {nonFinalDetail}");
+                return;
+            }
             _logger.Log(SessionTag, "RecognitionEvent", $"kind=final generation={myGeneration} textLength={e.Result.Text.Length}");
             var translated = e.Result.Translations.TryGetValue(targetTwoLetter, out var t) ? t : "";
 
@@ -371,7 +437,10 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
             _logger.Log(SessionTag, "UtteranceEvaluated",
                 $"generation={myGeneration} durationMs={e.Result.Duration.TotalMilliseconds:F0} " +
                 $"confidence={(confidence.HasValue ? confidence.Value.ToString("F2") : "null")} " +
-                $"accepted={decision.Accepted} reason=\"{decision.Reason}\"");
+                $"accepted={decision.Accepted} reason=\"{decision.Reason}\" " +
+                // Phase 21 (observation only): speech onset/end as reported by Azure, and how much audio had been fed when the Final arrived.
+                $"offsetMs={e.Result.OffsetInTicks / 10000.0:F0} speechEndMs={(e.Result.OffsetInTicks / 10000.0 + e.Result.Duration.TotalMilliseconds):F0} " +
+                $"pushedAudioMs={Interlocked.Read(ref _pushedBytes) / 32.0:F0}");
 
             if (decision.Accepted)
                 ArmTtsWatchdog(myGeneration);
@@ -382,9 +451,20 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
             // since Synthesizing arrives after this reset would otherwise have happened.
             lock (_instrumentationLock)
             {
+                // Phase 20 (observation only): close out the previous utterance's synthesis summary, then start tracking this one.
+                FlushSynthesisSummaryLocked("nextFinal");
+                _finalSequence++;
+                _finalReceivedAt = DateTimeOffset.UtcNow;
+                _summaryPending = true;
+                _pendingAccepted = decision.Accepted;
+                _synthChunks = 0; _synthBytes = 0; _suppressedBytes = 0;
+                _firstSynthAt = null; _lastSynthAt = null;
+                _watchdogFiredForPending = false;
+
                 var elapsedT0ToFinalMs = (DateTimeOffset.UtcNow - _utteranceCaptureStartedAt).TotalMilliseconds;
                 _logger.Log(SessionTag, "UtteranceSummary",
                     $"generation={myGeneration} partialCount={_partialSequenceInUtterance} revisionCount={_partialRevisionCount} " +
+                    $"regressionCount={_partialLengthRegressionCount} maxRegressionMagnitudeChars={_maxPartialLengthRegressionMagnitude} " +
                     $"translatedPartialMissingCount={_translatedPartialMissingCount} finalDurationMs={e.Result.Duration.TotalMilliseconds:F0} " +
                     $"elapsedT0ToFinalMs={elapsedT0ToFinalMs:F0} eligibilityAccepted={decision.Accepted}");
 
@@ -416,6 +496,8 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
                 _previousPartialText = null;
                 _previousPartialTranslatedText = null;
                 _partialRevisionCount = 0;
+                _partialLengthRegressionCount = 0;
+                _maxPartialLengthRegressionMagnitude = 0;
                 _translatedPartialMissingCount = 0;
                 _awaitingCaptureForInstrumentation = true;
             }
@@ -425,7 +507,11 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
 
         recognizer.Synthesizing += (_, e) =>
         {
-            if (myGeneration != _generation) return;
+            if (myGeneration != _generation)
+            {
+                _logger.Log(SessionTag, "StaleGenerationDrop", $"kind=synthesizing generation={myGeneration} current={_generation}"); // Phase 20: observation only
+                return;
+            }
             var audio = e.Result.GetAudio();
             if (audio is not { Length: > 0 }) return;
 
@@ -436,10 +522,27 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
             // first is the meaningful "first TTS audio" measurement).
             lock (_instrumentationLock)
             {
+                // Phase 20 (observation only): per-utterance chunk/byte accounting for the synthesis summary.
+                var nowSynth = DateTimeOffset.UtcNow;
+                var finalToAudioMs = _summaryPending ? (double?)(nowSynth - _finalReceivedAt).TotalMilliseconds : null;
+                if (_summaryPending)
+                {
+                    _synthChunks++; _synthBytes += audio.Length;
+                    _firstSynthAt ??= nowSynth; _lastSynthAt = nowSynth;
+                    if (!_lastUtteranceAccepted) _suppressedBytes += audio.Length;
+                }
+                else
+                {
+                    _logger.Log(SessionTag, "AudioWithoutPendingUtterance", $"generation={myGeneration} bytes={audio.Length}");
+                }
+
                 if (!_firstSynthesisLoggedForUtterance)
                 {
                     var elapsedT0ToFirstSynthesisMs = (DateTimeOffset.UtcNow - _t0ForPendingSynthesisTiming).TotalMilliseconds;
-                    _logger.Log(SessionTag, "SynthesisTiming", $"generation={myGeneration} elapsedT0ToFirstSynthesisMs={elapsedT0ToFirstSynthesisMs:F0}");
+                    _logger.Log(SessionTag, "SynthesisTiming", $"generation={myGeneration} elapsedT0ToFirstSynthesisMs={elapsedT0ToFirstSynthesisMs:F0}" +
+                        (finalToAudioMs.HasValue ? $" elapsedFinalToFirstSynthesisMs={finalToAudioMs.Value:F0}" : ""));
+                    if (_watchdogFiredForPending)
+                        _logger.Log(SessionTag, "TtsArrivedAfterWatchdog", $"generation={myGeneration} elapsedFinalToFirstSynthesisMs={finalToAudioMs?.ToString("F0") ?? "n/a"}");
                     _firstSynthesisLoggedForUtterance = true;
                 }
             }
@@ -489,6 +592,8 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
                 _previousPartialText = null;
                 _previousPartialTranslatedText = null;
                 _partialRevisionCount = 0;
+                _partialLengthRegressionCount = 0;
+                _maxPartialLengthRegressionMagnitude = 0;
                 _translatedPartialMissingCount = 0;
                 _awaitingCaptureForInstrumentation = true;
             }
@@ -581,6 +686,10 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
             }
 
             _pushStream?.Write(pcm16.ToArray());
+            // Phase 21 (observation only): position of the audio pushed so far + wall time of the first push.
+            Interlocked.Add(ref _pushedBytes, pcm16.Length);
+            if (Interlocked.CompareExchange(ref _firstPushTicks, DateTimeOffset.UtcNow.Ticks, 0) == 0)
+                _logger.Log(SessionTag, "FirstAudioPushed", $"generation={Volatile.Read(ref _generation)}");
             var total = Interlocked.Increment(ref _totalChunksSent);
             if (total % AudioLogEveryNChunks == 0)
                 _logger.Log(SessionTag, "AudioChunksSent", $"totalChunks={total} lastChunkBytes={pcm16.Length}");
@@ -595,6 +704,7 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
     public async Task StopAsync()
     {
         _logger.Log(SessionTag, "Shutdown", "StopAsync called");
+        lock (_instrumentationLock) FlushSynthesisSummaryLocked("shutdown"); // Phase 20: observation only
         _stopRequested = true;
         _lifetimeCts?.Cancel();
         DisarmTtsWatchdog();
@@ -644,6 +754,27 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
         _logger.Log(SessionTag, "Shutdown", "DisposeAsync completed");
     }
 
+    /// <summary>
+    /// Phase 20 — observation only. Logs one metadata-only line summarizing the synthesis of the
+    /// previous utterance (chunks, bytes, derived audio length assuming the 16 kHz mono 16-bit PCM this
+    /// class already declares for <see cref="SynthesizedAudio"/>, latencies) and clears the pending flag.
+    /// Caller must hold <c>_instrumentationLock</c>. Never reads or logs text/audio content and never
+    /// influences control flow. Limitation: audio arriving late for utterance N after utterance N+1's
+    /// Final is attributed to N+1 (the provider cannot distinguish them).
+    /// </summary>
+    private void FlushSynthesisSummaryLocked(string reason)
+    {
+        if (!_summaryPending) return;
+        var finalToFirst = _firstSynthAt.HasValue ? (_firstSynthAt.Value - _finalReceivedAt).TotalMilliseconds.ToString("F0") : "none";
+        var finalToLast = _lastSynthAt.HasValue ? (_lastSynthAt.Value - _finalReceivedAt).TotalMilliseconds.ToString("F0") : "none";
+        var firstToLast = _firstSynthAt.HasValue && _lastSynthAt.HasValue ? (_lastSynthAt.Value - _firstSynthAt.Value).TotalMilliseconds.ToString("F0") : "none";
+        _logger.Log(SessionTag, "SynthesisSummary",
+            $"seq={_finalSequence} accepted={_pendingAccepted} chunks={_synthChunks} bytes={_synthBytes} suppressedBytes={_suppressedBytes} " +
+            $"audioMs={(_synthBytes / 32.0):F0} finalToFirstAudioMs={finalToFirst} finalToLastAudioMs={finalToLast} firstToLastAudioMs={firstToLast} " +
+            $"watchdogFired={_watchdogFiredForPending} reason={reason}");
+        _summaryPending = false;
+    }
+
     private void ArmTtsWatchdog(int forGeneration)
     {
         lock (_watchdogLock)
@@ -654,9 +785,12 @@ public sealed class AzureSpeechTranslationProvider : ISpeechTranslationProvider,
                 // Fires only if no Synthesizing event arrived in time, and only if we're
                 // still the same generation (a reconnect/new utterance already moved on).
                 if (forGeneration == _generation && !_stopRequested)
+                {
+                    lock (_instrumentationLock) _watchdogFiredForPending = true; // Phase 20: observation only
                     _logger.Log(SessionTag, "TtsMissing",
                         $"generation={forGeneration} timeoutMs={TtsWatchdogTimeoutMs} " +
                         "note=an accepted utterance produced no synthesized audio within the timeout");
+                }
             }, null, TtsWatchdogTimeoutMs, Timeout.Infinite);
         }
     }

@@ -1,6 +1,7 @@
 using System.Threading;
 using VTTranslate.Core.Audio;
 using VTTranslate.Core.Providers;
+using VTTranslate.Core.Diagnostics;
 
 namespace VTTranslate.Core.Session;
 
@@ -41,6 +42,27 @@ namespace VTTranslate.Core.Session;
 /// </summary>
 public sealed class DirectionPipeline : IAsyncDisposable
 {
+    // Phase 20 — bundled-TTS observability (observation only; never read by control flow). Metadata only:
+    // byte counts and latencies, never audio or text. Null logger = no logging.
+    private readonly IDiagnosticLogger? _obsLogger;
+    private long _obsFinalTicks;
+    private int _obsFirstEnqueueLogged = 1; // 1 = nothing pending (no Final yet)
+    private string ObsTag => $"{Session.SourceLanguage}->{Session.TargetLanguage}";
+
+    /// <summary>
+    /// Logs, once per utterance (first non-suppressed chunk after a Final), the time from the Final result to the
+    /// moment the audio was handed to the playback sink. This is "enqueued to sink", not audible start — the sink
+    /// (WASAPI/BufferedWaveProvider) exposes no played-position, so audible start is not measured here.
+    /// </summary>
+    private void ObserveEnqueue(int bytes)
+    {
+        if (_obsLogger is null) return;
+        if (Interlocked.Exchange(ref _obsFirstEnqueueLogged, 1) != 0) return;
+        var finalTicks = Interlocked.Read(ref _obsFinalTicks);
+        var ms = finalTicks == 0 ? (double?)null : (DateTimeOffset.UtcNow - new DateTimeOffset(finalTicks, TimeSpan.Zero)).TotalMilliseconds;
+        _obsLogger.Log(ObsTag, "PlaybackFirstEnqueue", $"finalToEnqueueMs={(ms.HasValue ? ms.Value.ToString("F0") : "n/a")} bytes={bytes}");
+    }
+
     public TranslationSession Session { get; }
     public LatencyBreakdown Latency { get; } = new();
 
@@ -65,12 +87,14 @@ public sealed class DirectionPipeline : IAsyncDisposable
         TranslationSession session,
         IAudioInputSource capture,
         IAudioOutputSink playback,
-        ISpeechTranslationProvider provider)
+        ISpeechTranslationProvider provider,
+        IDiagnosticLogger? logger = null)
     {
         Session = session;
         _capture = capture;
         _playback = playback;
         _provider = provider;
+        _obsLogger = logger; // Phase 20: observation only (null = no logging, identical behavior)
 
         _capture.PcmChunkCaptured += (_, chunk) =>
         {
@@ -81,7 +105,11 @@ public sealed class DirectionPipeline : IAsyncDisposable
             }
         };
         _capture.CaptureError += (_, ex) => RaiseError($"Audio capture failed: {ex.Message}", true);
-        _playback.PlaybackError += (_, ex) => RaiseError($"Audio playback failed: {ex.Message}", true);
+        _playback.PlaybackError += (_, ex) =>
+        {
+            _obsLogger?.Log(ObsTag, "PlaybackError", $"type={ex.GetType().Name}"); // Phase 20: observation only
+            RaiseError($"Audio playback failed: {ex.Message}", true);
+        };
 
         _provider.PartialResult += (_, r) =>
         {
@@ -92,6 +120,8 @@ public sealed class DirectionPipeline : IAsyncDisposable
         _provider.FinalResult += (_, r) =>
         {
             Latency.OnFinalResult(); // T3/T4
+            Interlocked.Exchange(ref _obsFinalTicks, DateTimeOffset.UtcNow.Ticks); // Phase 20: observation only
+            Interlocked.Exchange(ref _obsFirstEnqueueLogged, 0);
 
             // Utterance boundary, declared by Azure itself — not a timer. See the
             // class doc comment for why this is the deterministic correlation point.
@@ -116,10 +146,12 @@ public sealed class DirectionPipeline : IAsyncDisposable
             if (Interlocked.Read(ref _suppressedUtteranceSequence) == Interlocked.Read(ref _utteranceSequence))
             {
                 Latency.OnPlaybackSuppressed();
+                _obsLogger?.Log(ObsTag, "PlaybackSuppressed", $"bytes={audio.Pcm16.Length}"); // Phase 20: observation only
                 return;
             }
 
             _playback.EnqueueAudio(audio.Pcm16);
+            ObserveEnqueue(audio.Pcm16.Length); // Phase 20: observation only
             Latency.OnPlaybackEnqueued(); // T6
         };
         _provider.Error += (_, e) => RaiseError(e.Message, e.IsFatal);

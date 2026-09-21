@@ -19,8 +19,22 @@ public sealed record EligibilityDecision(bool Accepted, string Reason);
 /// </summary>
 public static class UtteranceEligibilityGate
 {
-    /// <summary>Below this, an utterance is almost certainly a noise blip, not a real word.</summary>
-    public const double MinimumDurationMs = 250;
+    /// <summary>
+    /// Below this, an utterance is almost certainly a noise blip, not a real word.
+    /// Phase 12A: lowered from 250 to 200 — real UAT evidence (Phase 11C) proved a
+    /// correctly-recognized, correctly-translated genuine short word ("Ja.", 240ms,
+    /// no confidence signal available) was being rejected here unconditionally, with
+    /// no escape hatch, since this check runs before confidence/word-density are ever
+    /// consulted. 200ms preserves 120ms of margin over the documented 80ms noise-blip
+    /// test case (VeryShortBlip_BelowMinimumDuration_IsRejected, still rejected
+    /// unchanged) while letting genuine short words in the 200-250ms range reach the
+    /// existing confidence/word-density evaluation below — the same evaluation that
+    /// already accepts longer no-confidence utterances like "Yes" at 400ms. This does
+    /// narrow blip protection in the 200-250ms band specifically (a single-syllable
+    /// noise event with no confidence signal could now pass the word-density fallback
+    /// there) — a deliberate, disclosed trade-off, not a hidden one.
+    /// </summary>
+    public const double MinimumDurationMs = 200;
 
     /// <summary>Azure's own confidence at or above this is trusted outright.</summary>
     public const double HighConfidenceThreshold = 0.5;

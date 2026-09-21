@@ -148,4 +148,69 @@ public class UtteranceEligibilityGateTests
 
         Assert.True(decision.Accepted);
     }
+
+    // ---- Phase 12A: MinimumDurationMs 250 -> 200 ----
+
+    [Fact]
+    public void RealUatCase_Ja_240ms_NoConfidence_IsNowAccepted()
+    {
+        // The exact, real, proven Phase 11C defect: correctly recognized, correctly
+        // translated, but previously rejected outright by the 250ms floor before
+        // confidence/word-density were ever consulted. Must now pass.
+        var decision = UtteranceEligibilityGate.Evaluate(TimeSpan.FromMilliseconds(240), "Ja", confidence: null);
+
+        Assert.True(decision.Accepted);
+    }
+
+    [Fact]
+    public void RealUatCase_No_ComparableShortDuration_IsAccepted()
+    {
+        // The EN counterpart that already passed at a similar short duration in real
+        // UAT — must remain accepted after the threshold change (no regression).
+        var decision = UtteranceEligibilityGate.Evaluate(TimeSpan.FromMilliseconds(260), "No", confidence: null);
+
+        Assert.True(decision.Accepted);
+    }
+
+    [Fact]
+    public void ShortNoiseCase_JustAboveNewFloor_LowConfidence_IsStillRejected()
+    {
+        // A short burst at 210ms (above the new 200ms floor, below the old 250ms one)
+        // MUST still be rejected when confidence explicitly says it's noise — the
+        // threshold change only removes the unconditional block; it does not weaken
+        // the existing confidence check.
+        var decision = UtteranceEligibilityGate.Evaluate(TimeSpan.FromMilliseconds(210), "static", confidence: 0.05);
+
+        Assert.False(decision.Accepted);
+        Assert.Contains("confidence", decision.Reason);
+    }
+
+    [Fact]
+    public void ExistingBlipCase_80ms_StillRejectedUnchanged()
+    {
+        // The original noise-blip protection this floor exists for is untouched —
+        // 80ms remains solidly below even the new, lower 200ms floor.
+        var decision = UtteranceEligibilityGate.Evaluate(TimeSpan.FromMilliseconds(80), "a", confidence: null);
+
+        Assert.False(decision.Accepted);
+        Assert.Contains("minimum", decision.Reason);
+    }
+
+    [Fact]
+    public void NormalUtterance_Unaffected_ByThresholdChange()
+    {
+        var decision = UtteranceEligibilityGate.Evaluate(TimeSpan.FromSeconds(2.5), "I would like to schedule a meeting tomorrow", confidence: 0.92);
+
+        Assert.True(decision.Accepted);
+    }
+
+    [Fact]
+    public void JustBelowNewFloor_199ms_StillRejectedByAbsoluteFloor()
+    {
+        // Boundary check: the new floor is 200ms, not "anything shortish now passes."
+        var decision = UtteranceEligibilityGate.Evaluate(TimeSpan.FromMilliseconds(199), "x", confidence: 0.99);
+
+        Assert.False(decision.Accepted);
+        Assert.Contains("minimum", decision.Reason);
+    }
 }

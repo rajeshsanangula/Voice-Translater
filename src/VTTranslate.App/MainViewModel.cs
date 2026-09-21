@@ -488,7 +488,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
                 micToGermanSession,
                 new AudioCaptureSource(Settings.MicrophoneDeviceId!, CaptureKind.Microphone),
                 new AudioPlaybackSink(Settings.GermanOutputDeviceId!),
-                micResult.Provider);
+                micResult.Provider,
+                _diagnosticLogger); // Phase 20: observation-only playback logging
             // Phase 7.2: one renewal coordinator for THIS direction only, started once
             // the pipeline itself starts (below) so the session-lifetime token (_cts)
             // it links to is the one actually governing this session.
@@ -520,7 +521,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
                     remoteToEnglishSession,
                     new AudioCaptureSource(Settings.RemoteAudioInputDeviceId!, CaptureKind.SystemLoopback),
                     new AudioPlaybackSink(Settings.EnglishOutputDeviceId!),
-                    remoteResult.Provider);
+                    remoteResult.Provider,
+                    _diagnosticLogger); // Phase 20: observation-only playback logging
                 _remoteToEnglishRenewal = new ProviderCredentialRenewalCoordinator(
                     _apiClient, remoteResult.Provider, deviceIdAfterRemote, "AzureSpeech", "SpeechRecognition", "DE→EN", _diagnosticLogger);
 
