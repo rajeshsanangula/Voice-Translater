@@ -189,6 +189,25 @@
                                        Visibility="{Binding ConfigWarnings, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
                             <TextBlock Text="{Binding LastError}" Foreground="{StaticResource StatusErrorBrush}" TextWrapping="Wrap" Margin="0,6,0,0" FontWeight="SemiBold"
                                        Visibility="{Binding LastError, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
+
+                            <!-- Phase 25E: explicit device-replacement confirmation — never shown/acted on automatically. -->
+                            <Border Style="{StaticResource CardBorder}" Margin="0,10,0,0"
+                                    Visibility="{Binding ShowDeviceReplaceConfirmation, Converter={x:Static local:BoolToVisibilityConverter.Instance}}">
+                                <StackPanel>
+                                    <TextBlock Text="Another device is already registered for this account."
+                                               FontWeight="SemiBold" TextWrapping="Wrap" />
+                                    <TextBlock Text="Replace the existing device with this computer?"
+                                               TextWrapping="Wrap" Margin="0,4,0,0" />
+                                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                        <Button Content="Replace device" Command="{Binding ConfirmDeviceReplaceCommand}"
+                                                Style="{StaticResource PrimaryButton}" Margin="0,0,8,0" MinWidth="120" />
+                                        <Button Content="Cancel" Command="{Binding CancelDeviceReplaceCommand}"
+                                                Style="{StaticResource SecondaryButton}" MinWidth="90" />
+                                    </StackPanel>
+                                    <TextBlock Text="Replacing…" Style="{StaticResource HintText}" Margin="0,6,0,0"
+                                               Visibility="{Binding IsReplacingDevice, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" />
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
                     </Border>
 

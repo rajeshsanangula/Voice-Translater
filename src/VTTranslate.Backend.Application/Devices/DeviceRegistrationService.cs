@@ -48,6 +48,48 @@ public sealed class DeviceRegistrationService(
             return device;
         }, ct);
 
+    public Task<Device> ReplaceDeviceAsync(Guid accountId, DevicePlatform platform, string? displayName, CancellationToken ct) =>
+        // Phase 25E: same account-row-lock + transaction shape as RegisterDeviceAsync above (see its own comment) —
+        // no window in which two devices are simultaneously live, and no window in which zero are (a failed
+        // transaction rolls back both the revokes and the new registration together).
+        unitOfWork.ExecuteInTransactionAsync(async innerCt =>
+        {
+            await accounts.LockAccountForDeviceRegistrationAsync(accountId, innerCt);
+
+            var existing = await devices.ListByAccountAsync(accountId, innerCt);
+            var revokedCount = 0;
+            foreach (var old in existing.Where(d => d.Status != DeviceStatus.Revoked))
+            {
+                old.Status = DeviceStatus.Revoked;
+                old.RevokedAt = clock.UtcNow;
+                await devices.SaveAsync(old, innerCt);
+                await AuditAsync(accountId, old.Id, "DeviceRevoked", "reason=replaced", innerCt);
+                revokedCount++;
+            }
+
+            // Re-check the limit AFTER revoking (not assumed to be 0): a plan explicitly configured with
+            // MaxActiveDevices=0 (Phase 6.7 §3.3, a deliberate "no devices permitted" value) must still refuse the
+            // new device even though every prior device was just revoked — replacement is never a way around the limit.
+            var maxDevices = await GetMaxActiveDevicesAsync(accountId, innerCt);
+            if (0 >= maxDevices)
+                throw new DeviceLimitExceededException(maxDevices);
+
+            var device = new Device
+            {
+                Id = Guid.NewGuid(),
+                AccountId = accountId,
+                Platform = platform,
+                DisplayName = displayName,
+                Status = DeviceStatus.Authorized,
+                RegisteredAt = clock.UtcNow,
+                LastSeenAt = clock.UtcNow,
+            };
+
+            await devices.SaveAsync(device, innerCt);
+            await AuditAsync(accountId, device.Id, "DeviceRegistered", $"platform={platform};replacedCount={revokedCount}", innerCt);
+            return device;
+        }, ct);
+
     public Task<IReadOnlyList<Device>> ListDevicesAsync(Guid accountId, CancellationToken ct) =>
         devices.ListByAccountAsync(accountId, ct);
 

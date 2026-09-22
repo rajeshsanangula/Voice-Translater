@@ -92,6 +92,17 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
     private string _reconnectStatus = "";
     public string ReconnectStatus { get => _reconnectStatus; set { _reconnectStatus = value; Raise(); Raise(nameof(StatusKind)); } }
 
+    // ---- Phase 25E: explicit, customer-confirmed device replacement ----
+    // Set only when the backend reports device_limit_exceeded during initial device registration (ApiErrorCategory.
+    // DeviceLimitExceeded). Never set/cleared automatically otherwise, and StartAsync never calls ReplaceDeviceAsync
+    // on its own — only ConfirmDeviceReplaceCommand does, after the customer explicitly clicks it.
+    private bool _showDeviceReplaceConfirmation;
+    public bool ShowDeviceReplaceConfirmation { get => _showDeviceReplaceConfirmation; private set { _showDeviceReplaceConfirmation = value; Raise(); } }
+    private bool _isReplacingDevice;
+    public bool IsReplacingDevice { get => _isReplacingDevice; private set { _isReplacingDevice = value; Raise(); } }
+    public ICommand ConfirmDeviceReplaceCommand { get; }
+    public ICommand CancelDeviceReplaceCommand { get; }
+
     /// <summary>Presentation-only classification — see <see cref="AppStatusKind"/>. Never invents a state the pipeline doesn't already expose.</summary>
     public AppStatusKind StatusKind
     {
@@ -229,6 +240,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
         ToggleMuteCommand = new RelayCommand(() => IsMicrophoneMuted = !IsMicrophoneMuted, () => IsRunning);
         SignInCommand = new RelayCommand(async () => await SignInAsync(), () => !IsSignedIn);
         SignOutCommand = new RelayCommand(async () => await SignOutAsync(), () => IsSignedIn);
+        ConfirmDeviceReplaceCommand = new RelayCommand(async () => await ConfirmDeviceReplaceAsync(), () => ShowDeviceReplaceConfirmation && !IsReplacingDevice);
+        CancelDeviceReplaceCommand = new RelayCommand(CancelDeviceReplace, () => ShowDeviceReplaceConfirmation && !IsReplacingDevice);
         OpenAccountCommand = new RelayCommand(async () =>
         {
             IsAccountViewOpen = true;
@@ -548,6 +561,16 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
             _heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
             _ = HeartbeatLoop(_activeSessionId.Value, _heartbeatCts.Token);
         }
+        catch (AutraxisApiException ex) when (ex.Category == ApiErrorCategory.DeviceLimitExceeded)
+        {
+            // Phase 25E: never auto-replace. Surface the explicit confirmation prompt and stop here — the customer
+            // decides. No retry loop: this is set exactly once per failed start attempt, and is only cleared by an
+            // explicit Confirm or Cancel action.
+            LastError = null;
+            Status = "Another device is already registered for this account.";
+            ShowDeviceReplaceConfirmation = true;
+            await StopAsync();
+        }
         catch (AutraxisApiException ex)
         {
             LastError = MapApiErrorToMessage(ex);
@@ -560,6 +583,53 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
             Status = "Error";
             await StopAsync();
         }
+    }
+
+    /// <summary>
+    /// Phase 25E — called ONLY from <see cref="ConfirmDeviceReplaceCommand"/>, i.e. only after the customer has
+    /// explicitly clicked "Replace the existing device with this computer?". Performs exactly one replacement
+    /// attempt and, on success, exactly one retry of <see cref="StartAsync"/> (which will now find the freshly
+    /// persisted device id and proceed normally) — never a further automatic retry if that second attempt fails.
+    /// </summary>
+    private async Task ConfirmDeviceReplaceAsync()
+    {
+        if (_deviceCoordinator is null) return;
+        IsReplacingDevice = true;
+        (ConfirmDeviceReplaceCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        (CancelDeviceReplaceCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        try
+        {
+            await _deviceCoordinator.ReplaceDeviceAsync(_cts?.Token ?? CancellationToken.None);
+            ShowDeviceReplaceConfirmation = false;
+            Status = "Device replaced.";
+            LastError = null;
+            await StartAsync(); // one retry — EnsureDeviceRegisteredAsync now reuses the freshly-persisted device id
+        }
+        catch (AutraxisApiException ex)
+        {
+            // A failed replacement must not silently look like success, and must not leave the confirmation
+            // prompt looping automatically — it stays visible so the customer can explicitly try again or cancel.
+            LastError = MapApiErrorToMessage(ex);
+            Status = "Device replacement failed.";
+        }
+        catch (Exception ex)
+        {
+            LastError = $"Device replacement failed: {ex.Message}";
+            Status = "Device replacement failed.";
+        }
+        finally
+        {
+            IsReplacingDevice = false;
+            (ConfirmDeviceReplaceCommand as RelayCommand)?.RaiseCanExecuteChanged();
+            (CancelDeviceReplaceCommand as RelayCommand)?.RaiseCanExecuteChanged();
+        }
+    }
+
+    private void CancelDeviceReplace()
+    {
+        ShowDeviceReplaceConfirmation = false;
+        Status = "Stopped";
+        LastError = null;
     }
 
     /// <summary>Public (not private) so it is directly unit-testable without constructing a full <see cref="MainViewModel"/> (which has environment/settings-file side effects) — same "expose a small pure function publicly rather than add InternalsVisibleTo" convention already established in Phase 7.2's <c>ProviderCredentialRenewalCoordinator.ComputeRenewalDelay</c>.</summary>

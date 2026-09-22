@@ -441,6 +441,38 @@ app.MapPost("/devices", async (HttpContext ctx, RegisterDeviceRequest request, I
     }
 }).RequireAuthorization();
 
+// ---- Phase 25E: explicit, customer-confirmed device replacement ----
+// No request body — deliberately: the account comes exclusively from AccountResolutionMiddleware (never a client-
+// supplied accountId), and there is no client-supplied "old device id" either (see DeviceRegistrationService.
+// ReplaceDeviceAsync's own doc comment — it revokes the calling account's OWN device set, nothing a client points
+// at). Platform/displayName are the same client-supplied, non-authorization values POST /devices already accepts.
+app.MapPost("/devices/replace", async (HttpContext ctx, RegisterDeviceRequest request, IDeviceRegistrationService deviceService) =>
+{
+    if (!Enum.TryParse<DevicePlatform>(request.Platform, ignoreCase: true, out var platform))
+        return Results.BadRequest(new { status = "invalid_platform" });
+    if (request.DisplayName is { Length: > 200 })
+        return Results.BadRequest(new { status = "display_name_too_long" });
+
+    var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
+    try
+    {
+        var device = await deviceService.ReplaceDeviceAsync(account.Id, platform, request.DisplayName, ctx.RequestAborted);
+        return Results.Json(new
+        {
+            id = device.Id,
+            platform = device.Platform.ToString(),
+            displayName = device.DisplayName,
+            status = device.Status.ToString(),
+            registeredAt = device.RegisteredAt,
+        }, statusCode: StatusCodes.Status201Created);
+    }
+    catch (DeviceLimitExceededException)
+    {
+        // Only reachable when the plan's own MaxActiveDevices is 0 — replacement is never a way around the limit.
+        return Results.Json(new { status = "device_limit_exceeded" }, statusCode: StatusCodes.Status403Forbidden);
+    }
+}).RequireAuthorization();
+
 app.MapPost("/devices/{id:guid}/revoke", async (HttpContext ctx, Guid id, IDeviceRegistrationService deviceService) =>
 {
     var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;

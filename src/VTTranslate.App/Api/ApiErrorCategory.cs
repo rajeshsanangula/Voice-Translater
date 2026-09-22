@@ -15,6 +15,8 @@ public enum ApiErrorCategory
     AuthenticationCancelled,
     AccountNotUsable,
     DeviceNotAuthorized,
+    /// <summary>Phase 25E: the account is already at its device limit — distinct from <see cref="DeviceNotAuthorized"/> (never auto-recovered; the caller must obtain explicit customer confirmation, then call <c>ReplaceDeviceAsync</c>).</summary>
+    DeviceLimitExceeded,
     EntitlementDenied,
     ProviderAccessDenied,
     NetworkUnavailable,
@@ -33,9 +35,12 @@ public enum ApiErrorCategory
 }
 
 /// <summary>Carries a stable category (never raw exception text) plus the backend's own status string, if any, purely for internal diagnostics (never shown to the end user, never logged with token content — docs §25).</summary>
-public sealed class AutraxisApiException(ApiErrorCategory category, string? backendStatus = null, Exception? inner = null)
+public sealed class AutraxisApiException(ApiErrorCategory category, string? backendStatus = null, Exception? inner = null, string? backendCode = null)
     : Exception($"AUTRAXIS API call failed: {category}" + (backendStatus is null ? "" : $" ({backendStatus})"), inner)
 {
     public ApiErrorCategory Category { get; } = category;
     public string? BackendStatus { get; } = backendStatus;
+
+    /// <summary>Phase 25B: the backend's stable machine-readable reason (e.g. <c>trial_expired</c>, <c>trial_usage_exhausted</c>), if any — used only to choose a customer message.</summary>
+    public string? BackendCode { get; } = backendCode;
 }

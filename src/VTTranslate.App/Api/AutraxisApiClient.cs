@@ -52,6 +52,15 @@ public sealed class AutraxisApiClient : IAutraxisApiClient
     public Task RevokeDeviceAsync(Guid deviceId, CancellationToken ct = default) =>
         SendAsync<object>(HttpMethod.Post, $"/devices/{deviceId}/revoke", body: null, ct);
 
+    /// <summary>
+    /// Phase 25E — explicit, customer-confirmed replacement of the account's current device set with this one.
+    /// Carries no device id and no account id (server-derived only) — see <c>POST /devices/replace</c>'s own
+    /// comment. Callers must obtain the customer's explicit confirmation before calling this; it is never invoked
+    /// automatically from a <see cref="ApiErrorCategory.DeviceLimitExceeded"/> failure.
+    /// </summary>
+    public async Task<DeviceDto> ReplaceDeviceAsync(string platform, string? displayName, CancellationToken ct = default) =>
+        await SendAsync<DeviceDto>(HttpMethod.Post, "/devices/replace", new { platform, displayName }, ct) ?? throw EmptyResponse();
+
     public async Task<ProviderAccessGrantDto> RequestProviderAccessAsync(Guid deviceId, string provider, string capability, CancellationToken ct = default) =>
         await SendAsync<ProviderAccessGrantDto>(HttpMethod.Post, "/provider-access", new { deviceId = deviceId.ToString(), provider, capability }, ct) ?? throw EmptyResponse();
 
@@ -164,6 +173,9 @@ public sealed class AutraxisApiClient : IAutraxisApiClient
             var category = response.StatusCode switch
             {
                 HttpStatusCode.Forbidden when status == "device_not_authorized" => ApiErrorCategory.DeviceNotAuthorized,
+                // Phase 25E: distinct from the generic 403 catch-all so the caller can offer explicit device
+                // replacement — never auto-handled here, this is a category only, not a retry.
+                HttpStatusCode.Forbidden when status == "device_limit_exceeded" => ApiErrorCategory.DeviceLimitExceeded,
                 HttpStatusCode.Forbidden when status is "entitlement_denied" or "usage_denied" => ApiErrorCategory.EntitlementDenied,
                 HttpStatusCode.Forbidden when status is "account_not_found" or "account_suspended" => ApiErrorCategory.AccountNotUsable,
                 HttpStatusCode.Forbidden => ApiErrorCategory.ProviderAccessDenied,

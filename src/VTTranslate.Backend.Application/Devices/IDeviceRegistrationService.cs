@@ -32,4 +32,20 @@ public interface IDeviceRegistrationService
 
     /// <summary>The single question the real-time translation entitlement gate ultimately depends on for the device side of its check (Phase 6.1 §5) — true iff the device exists, belongs to the account, and is currently Authorized.</summary>
     Task<bool> IsDeviceAuthorizedAsync(Guid accountId, Guid deviceId, CancellationToken ct);
+
+    /// <summary>
+    /// Phase 25E — explicit, customer-confirmed device replacement (the fix for the Phase 25C recovery gap: an
+    /// account at <see cref="EntitlementKeys.MaxActiveDevices"/> with its one existing device still Authorized has no
+    /// way to register on a new/reinstalled machine via <see cref="RegisterDeviceAsync"/> alone). Atomically, under
+    /// the SAME account row lock <see cref="RegisterDeviceAsync"/> uses: revokes every currently non-revoked device
+    /// on the account (setting <c>RevokedAt</c>, auditing each), then registers the new device — never a window with
+    /// two live devices, never a window with zero. <see cref="EntitlementKeys.MaxActiveDevices"/> is still enforced
+    /// against the post-revoke count (so e.g. a plan configured with a limit of 0 still refuses the new device even
+    /// after replacement). accountId is always the caller's own, authenticated account — this method takes no device
+    /// id and revokes only the calling account's own devices; it can never be pointed at another account's device.
+    /// This is "replace my current device set with this one," not a general per-device replacement primitive — a
+    /// future <c>MaxActiveDevices &gt; 1</c> plan wanting to keep one specific device and add another needs the
+    /// existing, unmodified <see cref="RevokeDeviceAsync"/> + <see cref="RegisterDeviceAsync"/> instead.
+    /// </summary>
+    Task<Device> ReplaceDeviceAsync(Guid accountId, DevicePlatform platform, string? displayName, CancellationToken ct);
 }

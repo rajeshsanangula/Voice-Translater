@@ -35,4 +35,14 @@ public interface IDeviceRegistrationCoordinator
     /// silently).
     /// </summary>
     Task<(T Result, Guid DeviceId)> ExecuteWithDeviceRecoveryAsync<T>(Guid deviceId, Func<Guid, Task<T>> operation, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase 25E — explicit device replacement. Calls <c>POST /devices/replace</c> (server-derived account, no
+    /// device id sent), persists the returned device id for the current identity, and returns it. This must ONLY be
+    /// called after the customer has explicitly confirmed replacement in the UI — never automatically from an
+    /// <see cref="VTTranslate.App.Api.ApiErrorCategory.DeviceLimitExceeded"/> failure, and never retried by this
+    /// method itself (one call = one replacement attempt; the caller decides whether to surface a failure or let the
+    /// customer try again).
+    /// </summary>
+    Task<Guid> ReplaceDeviceAsync(CancellationToken ct = default);
 }

@@ -17,6 +17,9 @@ public interface IAutraxisApiClient
     Task<Api.DeviceDto> RegisterDeviceAsync(string platform, string? displayName, CancellationToken ct = default);
     Task RevokeDeviceAsync(Guid deviceId, CancellationToken ct = default);
 
+    /// <summary>Phase 25E — see <see cref="AutraxisApiClient.ReplaceDeviceAsync"/>'s doc comment.</summary>
+    Task<Api.DeviceDto> ReplaceDeviceAsync(string platform, string? displayName, CancellationToken ct = default);
+
     /// <summary>Requests a short-lived provider credential (docs §22/§23) — the caller must keep the result memory-only, never persist or log <see cref="Api.ProviderAccessGrantDto.AccessToken"/>.</summary>
     Task<Api.ProviderAccessGrantDto> RequestProviderAccessAsync(Guid deviceId, string provider, string capability, CancellationToken ct = default);
 

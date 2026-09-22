@@ -40,6 +40,19 @@ public sealed class FakeAutraxisApiClient : IAutraxisApiClient
     public Task<ProfileDto> UpdateProfileAsync(string? displayName, string? preferredLanguagePair, CancellationToken ct = default) => throw new NotSupportedException();
     public Task<IReadOnlyList<DeviceDto>> GetDevicesAsync(CancellationToken ct = default) => throw new NotSupportedException();
     public Task RevokeDeviceAsync(Guid deviceId, CancellationToken ct = default) => throw new NotSupportedException();
+
+    // ---- Phase 25E: scriptable explicit-replacement responses ----
+    public int ReplaceDeviceCallCount { get; private set; }
+    public List<(string Platform, string? DisplayName)> ReplaceDeviceCalls { get; } = new();
+    public Queue<Func<DeviceDto>> ReplaceDeviceResponses { get; } = new();
+    public Task<DeviceDto> ReplaceDeviceAsync(string platform, string? displayName, CancellationToken ct = default)
+    {
+        ReplaceDeviceCallCount++;
+        ReplaceDeviceCalls.Add((platform, displayName));
+        if (ReplaceDeviceResponses.Count == 0)
+            throw new InvalidOperationException("FakeAutraxisApiClient: no more scripted replace-device responses.");
+        return Task.FromResult(ReplaceDeviceResponses.Dequeue()());
+    }
     public Task<TranslationSessionStartedDto> StartTranslationSessionAsync(Guid deviceId, string? clientSessionId, string? direction, CancellationToken ct = default) => throw new NotSupportedException();
     public Task<TranslationSessionOperationDto> HeartbeatTranslationSessionAsync(Guid sessionId, CancellationToken ct = default) => throw new NotSupportedException();
     public Task<TranslationSessionOperationDto> EndTranslationSessionAsync(Guid sessionId, CancellationToken ct = default) => throw new NotSupportedException();

@@ -209,6 +209,7 @@ public sealed class DeviceIdentityPersistenceTests : IDisposable
         public Task<ProfileDto> UpdateProfileAsync(string? d, string? p, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<IReadOnlyList<DeviceDto>> GetDevicesAsync(CancellationToken ct = default) => throw new NotSupportedException();
         public Task RevokeDeviceAsync(Guid deviceId, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<DeviceDto> ReplaceDeviceAsync(string platform, string? displayName, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<ProviderAccessGrantDto> RequestProviderAccessAsync(Guid deviceId, string provider, string capability, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<TranslationSessionStartedDto> StartTranslationSessionAsync(Guid deviceId, string? clientSessionId, string? direction, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<TranslationSessionOperationDto> HeartbeatTranslationSessionAsync(Guid sessionId, CancellationToken ct = default) => throw new NotSupportedException();
