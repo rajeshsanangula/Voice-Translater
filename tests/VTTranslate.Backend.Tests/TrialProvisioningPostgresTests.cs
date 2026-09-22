@@ -92,9 +92,28 @@ public sealed class TrialProvisioningPostgresTests(PostgresFixture fixture) : IC
     [SkipIfNoDockerFact]
     public async Task TrialUsage_IsSummedAcrossMonthBuckets_OnRealPostgres_AndSurvivesNewContexts()
     {
-        var accountId = Guid.NewGuid();
-        var deviceId = Guid.NewGuid();
+        // usage_records.AccountId/DeviceId are real foreign keys (FK_usage_records_accounts_AccountId,
+        // FK_usage_records_devices_DeviceId) — an arbitrary Guid.NewGuid() with no corresponding row is rejected by
+        // PostgreSQL (23503), unlike the in-memory double this test has no equivalent of. Seed a real Account (via
+        // the same TrialTestSupport/EfAccountRepository pattern the other tests in this class use) and a real
+        // Device row before writing any UsageRecord against them.
+        Guid accountId, deviceId;
         var since = new DateTimeOffset(2031, 1, 25, 9, 0, 0, TimeSpan.Zero);
+
+        await using (var seedDb = fixture.CreateContext())
+        {
+            var account = TrialTestSupport.NewAccount($"pg-trial-usage-{Guid.NewGuid():N}");
+            await new EfAccountRepository(seedDb).SaveAsync(account, CancellationToken.None);
+            accountId = account.Id;
+
+            var device = new Device
+            {
+                Id = Guid.NewGuid(), AccountId = accountId, Platform = DevicePlatform.Windows, DisplayName = "Test",
+                Status = DeviceStatus.Authorized, RegisteredAt = DateTimeOffset.UtcNow, LastSeenAt = DateTimeOffset.UtcNow,
+            };
+            await new EfDeviceRepository(seedDb).SaveAsync(device, CancellationToken.None);
+            deviceId = device.Id;
+        }
 
         await using (var db = fixture.CreateContext())
         {
