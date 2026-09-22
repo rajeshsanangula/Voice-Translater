@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using VTTranslate.Backend.Api.Security;
 using VTTranslate.Backend.Application.Authorization;
 using VTTranslate.Backend.Application.Billing;
+using VTTranslate.Backend.Application.Subscriptions;
+using VTTranslate.Backend.Api.Subscriptions;
 using VTTranslate.Backend.Application.Devices;
 using VTTranslate.Backend.Application.Entitlements;
 using VTTranslate.Backend.Application.Identity;
@@ -252,6 +254,31 @@ builder.Services.AddScoped<IEntitlementService, EntitlementService>();
 // LocallyCancelledAt/CancelAtPeriodEnd (see docs/phase-6.6-billing-subscription.md §9).
 builder.Services.AddScoped<ISubscriptionLifecycleService, SubscriptionLifecycleService>();
 builder.Services.AddScoped<IBillingWebhookProcessor, BillingWebhookProcessor>();
+
+// ---- Phase 25: operator-controlled free-Trial provisioning (entitlement only — NO payment) ----
+// Off by default. Subscriptions:Trial:{Enabled,PlanId} are non-secret. The customer endpoint
+// (POST /subscription/trial) and its service are registered ONLY when an operator has enabled the
+// Trial AND named a plan; otherwise no route exists and no subscription can be granted this way.
+var trialOptions = builder.Configuration.GetSection(TrialProvisioningOptions.SectionName).Get<TrialProvisioningOptions>()
+                   ?? new TrialProvisioningOptions();
+if (trialOptions.Enabled && !trialOptions.IsUsable)
+{
+    Console.WriteLine("[startup] Subscriptions:Trial:Enabled is true but Subscriptions:Trial:PlanId is missing — Trial provisioning stays DISABLED (fail closed).");
+}
+// Reporting an existing trial's usage/period (My Account) is always available; only STARTING a trial is operator-gated.
+builder.Services.AddScoped<ITrialUsageReporter, TrialUsageReporter>();
+if (trialOptions.IsUsable)
+{
+    builder.Services.AddScoped<ISubscriptionProvisioningService>(sp => new SubscriptionProvisioningService(
+        sp.GetRequiredService<IAccountRepository>(),
+        sp.GetRequiredService<ISubscriptionRepository>(),
+        sp.GetRequiredService<IPlanRepository>(),
+        sp.GetRequiredService<IAuditEventRepository>(),
+        sp.GetRequiredService<ISubscriptionLifecycleService>(),
+        sp.GetRequiredService<IUnitOfWork>(),
+        sp.GetRequiredService<IClock>(),
+        trialOptions.PlanId!.Value));
+}
 
 // ---- Phase 6.8: provider-access gateway ----
 // ProviderCredentials:{AzureSpeech,AzureTranslator}:{SubscriptionKey,Region} are SECRETS
@@ -531,6 +558,12 @@ app.MapPost("/subscription/cancel", async (HttpContext ctx, CancelSubscriptionRe
     });
 }).RequireAuthorization();
 
+// Phase 25: mapped only when the Trial has been explicitly enabled and configured by an operator.
+if (trialOptions.IsUsable)
+{
+    app.MapTrialSubscriptionEndpoint();
+}
+
 app.MapGet("/entitlements", async (HttpContext ctx, ISubscriptionRepository subscriptions, IPlanRepository plans) =>
 {
     var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
@@ -545,12 +578,21 @@ app.MapGet("/entitlements", async (HttpContext ctx, ISubscriptionRepository subs
     });
 }).RequireAuthorization();
 
-app.MapGet("/usage", async (HttpContext ctx, IUsageService usage, IClock clock) =>
+app.MapGet("/usage", async (HttpContext ctx, IUsageService usage, ITrialUsageReporter trialUsage, IClock clock) =>
 {
     var account = (Account)ctx.Items[AccountResolutionMiddleware.AccountItemsKey]!;
     var periodBucket = clock.UtcNow.ToString("yyyy-MM");
     var summary = await usage.GetSummaryAsync(account.Id, periodBucket, ctx.RequestAborted);
-    return Results.Ok(summary);
+    // Phase 25B: unchanged monthly summary fields, plus (only for a trial customer) the trial-lifetime allowance —
+    // clients must show `trial` (not the monthly figure / paid limit) for the trial allowance. Null when there is no trial.
+    var trial = await trialUsage.GetAsync(account.Id, ctx.RequestAborted);
+    return Results.Ok(new
+    {
+        summary.PeriodBucket,
+        summary.ServerDerivedSeconds,
+        summary.ClientReportedSeconds,
+        trial,
+    });
 }).RequireAuthorization();
 
 // ---- Phase 6.6: billing webhook — anonymous at the ASP.NET layer (no customer JWT
@@ -634,8 +676,10 @@ app.MapPost("/translation-sessions", async (HttpContext ctx, StartTranslationSes
             resumed = true,
         }),
         SessionStartOutcome.DeviceNotAuthorized => Results.Json(new { status = "device_not_authorized" }, statusCode: StatusCodes.Status403Forbidden),
-        SessionStartOutcome.EntitlementDenied => Results.Json(new { status = "entitlement_denied" }, statusCode: StatusCodes.Status403Forbidden),
-        SessionStartOutcome.UsageDenied => Results.Json(new { status = "usage_limit_exceeded" }, statusCode: StatusCodes.Status403Forbidden),
+        // Phase 25B: `code` is a stable, machine-readable reason (e.g. trial_expired / trial_usage_exhausted) the client maps
+        // to an upgrade message. It is null for denials with no dedicated reason. No payment/upgrade URL is implied here.
+        SessionStartOutcome.EntitlementDenied => Results.Json(new { status = "entitlement_denied", code = result.Code }, statusCode: StatusCodes.Status403Forbidden),
+        SessionStartOutcome.UsageDenied => Results.Json(new { status = "usage_limit_exceeded", code = result.Code }, statusCode: StatusCodes.Status403Forbidden),
         _ => Results.Json(new { status = "denied" }, statusCode: StatusCodes.Status403Forbidden),
     };
 }).RequireAuthorization();

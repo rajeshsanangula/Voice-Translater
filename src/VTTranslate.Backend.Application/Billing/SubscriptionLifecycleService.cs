@@ -135,7 +135,16 @@ public sealed class SubscriptionLifecycleService(
         // Evaluate the Expired predicate FIRST — guarantees a subscription that has
         // already crossed both bounds lands on Expired directly, never transiently on
         // GracePeriod (see docs/phase-6.6-billing-subscription.md "PastDue -> GracePeriod").
-        if ((subscription.Status == SubscriptionStatus.PastDue || subscription.Status == SubscriptionStatus.GracePeriod)
+        // Phase 25B: an unpaid Trial has no grace period — once its period has ended it is Expired (deterministic,
+        // time-based; no background job: this runs whenever the subscription is read/reconciled, and EntitlementService
+        // independently denies an ended Trial even before this transition is persisted).
+        if (subscription.Status == SubscriptionStatus.Trial && now > subscription.CurrentPeriodEnd)
+        {
+            subscription.Status = SubscriptionStatus.Expired;
+            changed = true;
+            await AuditAsync(subscription.AccountId, subscription.Id, "TrialExpiredByTimeReconciliation", null, ct);
+        }
+        else if ((subscription.Status == SubscriptionStatus.PastDue || subscription.Status == SubscriptionStatus.GracePeriod)
             && expiredBound is not null && now > expiredBound.Value)
         {
             subscription.Status = SubscriptionStatus.Expired;

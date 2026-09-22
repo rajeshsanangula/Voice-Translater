@@ -14,8 +14,8 @@ public interface IEntitlementService
 }
 
 /// <summary><see cref="Reason"/> is always populated (even when <see cref="Allowed"/> is true, e.g. "ok") so a denial is never a silent/ambiguous false.</summary>
-public sealed record EntitlementDecision(bool Allowed, string Reason)
+public sealed record EntitlementDecision(bool Allowed, string Reason, string? Code = null)
 {
     public static EntitlementDecision Allow(string reason) => new(true, reason);
-    public static EntitlementDecision Deny(string reason) => new(false, reason);
+    public static EntitlementDecision Deny(string reason, string? code = null) => new(false, reason, code);
 }

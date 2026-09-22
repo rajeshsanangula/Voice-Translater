@@ -125,10 +125,54 @@ public sealed class AccountViewModel : INotifyPropertyChanged
         get
         {
             if (_usage is null) return "";
+            // Phase 25B: a trial customer sees the trial allowance below — never the monthly figure, and never the paid
+            // UsageLimitSecondsPerPeriod presented as if it were the trial allowance.
+            if (_usage.Trial is not null) return "";
             var used = FormatDuration(_usage.ServerDerivedSeconds);
             return UsageLimitSeconds is { } limit ? $"{used} of {FormatDuration(limit)} used this period" : $"{used} used this period";
         }
     }
+
+    // ---- Trial (Phase 25B) ----
+    // Shown only when GET /usage reports a trial. The allowance is the trial-lifetime figure computed by the server from
+    // the plan's TrialUsageLimitSeconds — this view model never reads UsageLimitSecondsPerPeriod for a trial.
+    private TrialUsageDto? Trial => _usage?.Trial;
+
+    public bool HasTrial => Trial is not null;
+
+    public string TrialHeadline => Trial is null ? "" : $"Trial · {Math.Round((Trial.PeriodEnd - Trial.PeriodStart).TotalDays):F0}-day period";
+
+    public string TrialUsageDisplay => Trial is null
+        ? ""
+        : Trial.LimitSeconds is { } limit
+            ? $"{FormatTrialAmount(Trial.UsedSeconds)} / {FormatTrialAmount(limit)} used"
+            : $"{FormatTrialAmount(Trial.UsedSeconds)} used";
+
+    public string TrialRemainingDisplay => Trial?.RemainingSeconds is { } remaining ? $"{FormatDuration(remaining)} remaining" : "";
+
+    public string TrialEndDisplay => Trial is null
+        ? ""
+        : Trial.Ended ? $"Trial ended {Trial.PeriodEnd:MMM d, yyyy}" : $"Trial ends {Trial.PeriodEnd:MMM d, yyyy}";
+
+    /// <summary>Upgrade wording only — no payment is implemented and no upgrade link exists yet.</summary>
+    public string TrialUpgradeMessage => Trial is null
+        ? ""
+        : Trial.Ended ? TrialMessages.Ended : Trial.Exhausted ? TrialMessages.AllowanceUsed : "";
+
+    private void RaiseTrial()
+    {
+        Raise(nameof(HasTrial));
+        Raise(nameof(TrialHeadline));
+        Raise(nameof(TrialUsageDisplay));
+        Raise(nameof(TrialRemainingDisplay));
+        Raise(nameof(TrialEndDisplay));
+        Raise(nameof(TrialUpgradeMessage));
+    }
+
+    private static string FormatTrialAmount(double seconds) =>
+        seconds >= 3600 && Math.Abs(seconds % 3600) < 0.5
+            ? (seconds / 3600 == 1 ? "1 hour" : $"{seconds / 3600:F0} hours")
+            : FormatDuration(seconds);
 
     // ---- Cancellation ----
     private bool _isCancelling;
@@ -214,7 +258,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
         {
             IsLoadingEntitlements = false;
             Raise(nameof(HasUsageLimit));
-            Raise(nameof(UsageDisplay));
+            Raise(nameof(UsageDisplay)); RaiseTrial();
         }
     }
 
@@ -240,7 +284,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
         finally
         {
             IsLoadingUsage = false;
-            Raise(nameof(UsageDisplay));
+            Raise(nameof(UsageDisplay)); RaiseTrial();
         }
     }
 
@@ -304,7 +348,7 @@ public sealed class AccountViewModel : INotifyPropertyChanged
 
         RaiseSubscriptionDisplays();
         Raise(nameof(HasUsageLimit));
-        Raise(nameof(UsageDisplay));
+        Raise(nameof(UsageDisplay)); RaiseTrial();
     }
 
     private void RaiseSubscriptionDisplays()

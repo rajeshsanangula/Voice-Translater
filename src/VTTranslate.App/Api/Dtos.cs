@@ -12,7 +12,7 @@ public sealed record TranslationSessionStartedDto(Guid SessionId, string State, 
 public sealed record TranslationSessionOperationDto(Guid SessionId, string State, DateTimeOffset? LastActivityAt, DateTimeOffset? TerminalAt);
 
 /// <summary>Stable, backend-shape-matching problem response (docs §30) — the client parses this `status` field, never fragile human-readable text.</summary>
-public sealed record ProblemDto(string? Status);
+public sealed record ProblemDto(string? Status, string? Code = null);
 
 // ---- Phase 7.3 — customer subscription/entitlement/usage visibility ----
 // Shapes matched exactly against the actual, unmodified GET /subscription,
@@ -32,4 +32,7 @@ public sealed record CancelSubscriptionResultDto(string Status, bool CancelAtPer
 public sealed record EntitlementsDto(string SubscriptionStatus, IReadOnlyDictionary<string, string> Entitlements);
 
 /// <summary>Matches `GET /usage`'s `UsageSummary` record (`PeriodBucket`, `ServerDerivedSeconds`, `ClientReportedSeconds`) exactly — see UsageService.cs. <c>ServerDerivedSeconds</c> is the only authoritative value; <c>ClientReportedSeconds</c> is a hint only, never used for display-as-authoritative or enforcement.</summary>
-public sealed record UsageSummaryDto(string PeriodBucket, double ServerDerivedSeconds, double ClientReportedSeconds);
+public sealed record UsageSummaryDto(string PeriodBucket, double ServerDerivedSeconds, double ClientReportedSeconds, TrialUsageDto? Trial = null);
+
+/// <summary>Phase 25B: trial-lifetime allowance reported by GET /usage (null/absent when the account has no trial). Distinct from the monthly summary and from the paid UsageLimitSecondsPerPeriod limit.</summary>
+public sealed record TrialUsageDto(string Status, DateTimeOffset PeriodStart, DateTimeOffset PeriodEnd, double UsedSeconds, double? LimitSeconds, double? RemainingSeconds, bool Ended, bool Exhausted);

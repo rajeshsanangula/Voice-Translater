@@ -159,21 +159,13 @@ public sealed class DeviceReplacementServiceTests
         Assert.Contains(_audit.Events, e => e.EventType == "DeviceRegistered" && e.Metadata!.Contains("replacedCount=1"));
     }
 
-    [Fact]
-    public async Task ConcurrentReplaceRequests_SameAccount_YieldExactlyOneLiveDevice()
-    {
-        var accountId = await SeedAccountWithPlanAsync(maxActiveDevices: 1);
-        await _service.RegisterDeviceAsync(accountId, DevicePlatform.Windows, "Original", CancellationToken.None);
-
-        var results = await Task.WhenAll(Enumerable.Range(0, 20)
-            .Select(i => Task.Run(() => _service.ReplaceDeviceAsync(accountId, DevicePlatform.Windows, $"Replacement {i}", CancellationToken.None))));
-
-        var all = await _service.ListDevicesAsync(accountId, CancellationToken.None);
-        var live = all.Where(d => d.Status != DeviceStatus.Revoked).ToList();
-        Assert.Single(live);
-        Assert.Contains(results, r => r.Id == live[0].Id); // the surviving device is one of the attempted replacements
-        Assert.Equal(21, all.Count); // original + 20 replacement rows, all preserved as history
-    }
+    // NOTE: there is deliberately no in-memory "concurrent replace yields exactly one live device" test here.
+    // Concurrency/transaction serialization is an integration property of the PostgreSQL repository (the real
+    // account-row lock plus the partial unique index) and is verified by the Testcontainers tests in
+    // DeviceReplacementPostgresTests (A/B/E). InMemoryAccountRepository.LockAccountForDeviceRegistrationAsync is a
+    // documented no-op — the in-memory repository intentionally does not emulate database row locks — so asserting
+    // "exactly one survivor" against real parallel Task.Run callers here would be testing a guarantee this double
+    // cannot provide, not a property of DeviceRegistrationService.ReplaceDeviceAsync itself.
 
     [Fact]
     public async Task NormalRegistration_StillEnforcesTheLimit_Unchanged()

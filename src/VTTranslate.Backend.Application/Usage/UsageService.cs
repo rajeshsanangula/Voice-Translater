@@ -18,6 +18,22 @@ public sealed class UsageService(IUsageRecordRepository records, IClock clock) :
         return all.Where(r => r.Source == UsageRecordSource.ServerDerived).Sum(r => r.SecondsUsed);
     }
 
+    public async Task<double> GetAuthoritativeUsageSecondsSinceAsync(Guid accountId, DateTimeOffset since, CancellationToken ct)
+    {
+        var sinceUtc = since.UtcDateTime;
+        var nowUtc = clock.UtcNow.UtcDateTime;
+        var month = new DateTime(sinceUtc.Year, sinceUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var lastMonth = new DateTime(nowUtc.Year, nowUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var total = 0.0;
+        // Buckets are the UTC month of RecordedAt (see AddAsync), so every record at or after `since` lives in one of these buckets.
+        for (; month <= lastMonth; month = month.AddMonths(1))
+        {
+            var monthRecords = await records.ListByAccountAndPeriodAsync(accountId, month.ToString("yyyy-MM"), ct);
+            total += monthRecords.Where(r => r.Source == UsageRecordSource.ServerDerived && r.RecordedAt >= since).Sum(r => r.SecondsUsed);
+        }
+        return total;
+    }
+
     public async Task<UsageSummary> GetSummaryAsync(Guid accountId, string periodBucket, CancellationToken ct)
     {
         var all = await records.ListByAccountAndPeriodAsync(accountId, periodBucket, ct);

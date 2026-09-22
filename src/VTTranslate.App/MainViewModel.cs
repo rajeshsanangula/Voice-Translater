@@ -643,6 +643,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IAsyncDisposable
         // (usage exhausted vs. device limit vs. lapsed plan) since the backend error
         // itself doesn't distinguish one (docs §14) — "My Account" is where the customer
         // can actually see which of those applies.
+        // Phase 25B: a trial that ended or used its allowance gets a specific upgrade message (machine-readable server code).
+        ApiErrorCategory.EntitlementDenied when TrialMessages.ForCode(ex.BackendCode) is { } trialMessage => trialMessage,
         ApiErrorCategory.EntitlementDenied => "Your plan does not currently allow this. Check My Account for your current plan and usage.",
         ApiErrorCategory.ProviderAccessDenied => "Translation service access was denied.",
         ApiErrorCategory.NetworkUnavailable or ApiErrorCategory.ServiceUnavailable => "Cannot reach the AUTRAXIS service right now.",

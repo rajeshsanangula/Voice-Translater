@@ -68,7 +68,7 @@ public sealed class TranslationSessionService(
                     ? SessionStartOutcome.UsageDenied
                     : SessionStartOutcome.EntitlementDenied;
                 await AuditAsync(accountId, null, $"TranslationSessionDenied{outcome}", innerCt);
-                return new SessionStartResult(outcome, null, decision.Reason);
+                return new SessionStartResult(outcome, null, decision.Reason, decision.Code);
             }
 
             var now = clock.UtcNow;

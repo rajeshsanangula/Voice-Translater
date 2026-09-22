@@ -93,6 +93,17 @@
                                 Padding="10,4" Margin="0,6,0,0" HorizontalAlignment="Left" />
                     </StackPanel>
 
+                    <!-- Phase 25B: free-trial allowance (visible only when the server reports a trial). -->
+                    <StackPanel Visibility="{Binding HasTrial, Converter={x:Static local:BoolToVisibilityConverter.Instance}}" Margin="0,4,0,0">
+                        <TextBlock Text="{Binding TrialHeadline}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}" />
+                        <TextBlock Text="{Binding TrialUsageDisplay}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}" Margin="0,2,0,0" />
+                        <TextBlock Text="{Binding TrialRemainingDisplay}" Style="{StaticResource HintText}"
+                                   Visibility="{Binding TrialRemainingDisplay, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
+                        <TextBlock Text="{Binding TrialEndDisplay}" Style="{StaticResource HintText}" />
+                        <TextBlock Text="{Binding TrialUpgradeMessage}" Foreground="{StaticResource StatusErrorBrush}" TextWrapping="Wrap" FontWeight="SemiBold" Margin="0,6,0,0"
+                                   Visibility="{Binding TrialUpgradeMessage, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />
+                    </StackPanel>
+
                     <TextBlock Text="{Binding UsageDisplay}" FontWeight="SemiBold" Foreground="{StaticResource BrandNavyBrush}"
                                Margin="0,4,0,0"
                                Visibility="{Binding UsageDisplay, Converter={x:Static local:EmptyStringToCollapsedConverter.Instance}}" />

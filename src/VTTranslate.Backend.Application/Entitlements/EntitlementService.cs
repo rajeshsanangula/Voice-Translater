@@ -28,7 +28,7 @@ public sealed class EntitlementService(
         // 2. A subscription must exist.
         var subscription = await subscriptions.FindByAccountAsync(accountId, ct);
         if (subscription is null)
-            return EntitlementDecision.Deny("no subscription found for this account");
+            return await DenyNoLiveSubscriptionAsync(accountId, ct);
 
         var entitlements = await plans.GetEntitlementsAsync(subscription.PlanId, ct);
 
@@ -66,6 +66,12 @@ public sealed class EntitlementService(
                 break;
 
             case SubscriptionStatus.Trial:
+                // Phase 25B: an unpaid trial whose period has passed is unusable, regardless of whether
+                // time-based reconciliation has persisted the Expired transition yet.
+                if (clock.UtcNow > subscription.CurrentPeriodEnd)
+                    return EntitlementDecision.Deny("trial period has ended", TrialEndedCode);
+                break;
+
             case SubscriptionStatus.Active:
                 if (clock.UtcNow > subscription.CurrentPeriodEnd)
                     return EntitlementDecision.Deny("subscription period has ended");
@@ -78,10 +84,24 @@ public sealed class EntitlementService(
         }
 
         // 4. Usage-against-limit check — server-authoritative only (Phase 6.2B §7/§6).
-        var limitKey = subscription.Status == SubscriptionStatus.Trial
-            ? EntitlementKeys.TrialUsageLimitSeconds
-            : EntitlementKeys.UsageLimitSecondsPerPeriod;
-        var limitSeconds = ReadDouble(entitlements, limitKey);
+        if (subscription.Status == SubscriptionStatus.Trial)
+        {
+            // Phase 25B: the trial gets ONE allowance for the whole trial period — server-derived usage recorded since the
+            // persisted trial start, summed across month buckets (never reset by the calendar month). A trial plan without a
+            // positive limit fails closed: an unbounded trial is never granted. This check runs only when a session STARTS;
+            // a running session is never cut off, so one session can overshoot the allowance (usage is recorded when it ends).
+            var trialLimit = ReadDouble(entitlements, EntitlementKeys.TrialUsageLimitSeconds);
+            if (trialLimit is null or <= 0)
+                return EntitlementDecision.Deny("trial usage limit is not configured", "trial_not_configured");
+
+            var trialUsed = await usage.GetAuthoritativeUsageSecondsSinceAsync(accountId, subscription.CurrentPeriodStart, ct);
+            if (trialUsed >= trialLimit.Value)
+                return EntitlementDecision.Deny("usage limit for this trial has been reached", TrialExhaustedCode);
+
+            return EntitlementDecision.Allow("ok");
+        }
+
+        var limitSeconds = ReadDouble(entitlements, EntitlementKeys.UsageLimitSecondsPerPeriod);
         if (limitSeconds is not null)
         {
             var periodBucket = clock.UtcNow.ToString("yyyy-MM");
@@ -91,6 +111,26 @@ public sealed class EntitlementService(
         }
 
         return EntitlementDecision.Allow("ok");
+    }
+
+    /// <summary>Machine-readable denial codes the client maps to an upgrade message (Phase 25B). No payment is implied.</summary>
+    public const string TrialEndedCode = "trial_expired";
+    public const string TrialExhaustedCode = "trial_usage_exhausted";
+
+    private async Task<EntitlementDecision> DenyNoLiveSubscriptionAsync(Guid accountId, CancellationToken ct)
+    {
+        var history = await subscriptions.FindHistoryByAccountAsync(accountId, ct);
+        var latest = history.OrderByDescending(s => s.CurrentPeriodEnd).FirstOrDefault();
+        if (latest is { Status: SubscriptionStatus.Expired })
+        {
+            // Only an ended TRIAL gets the machine-readable upgrade reason; any other expired subscription keeps the
+            // pre-existing "no subscription found" denial unchanged.
+            var planEntitlements = await plans.GetEntitlementsAsync(latest.PlanId, ct);
+            if (planEntitlements.Any(e => e.Key == EntitlementKeys.TrialDurationDays))
+                return EntitlementDecision.Deny("trial has ended", TrialEndedCode);
+        }
+
+        return EntitlementDecision.Deny("no subscription found for this account");
     }
 
     private static int? ReadInt(IReadOnlyList<Entitlement> entitlements, string key)

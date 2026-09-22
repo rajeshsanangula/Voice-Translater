@@ -168,7 +168,7 @@ public sealed class AutraxisApiClient : IAutraxisApiClient
                 return await response.Content.ReadFromJsonAsync<T>(JsonOptions, ct);
             }
 
-            var status = await TryReadStatusAsync(response, ct);
+            var (status, code) = await TryReadProblemAsync(response, ct);
 
             var category = response.StatusCode switch
             {
@@ -176,7 +176,7 @@ public sealed class AutraxisApiClient : IAutraxisApiClient
                 // Phase 25E: distinct from the generic 403 catch-all so the caller can offer explicit device
                 // replacement — never auto-handled here, this is a category only, not a retry.
                 HttpStatusCode.Forbidden when status == "device_limit_exceeded" => ApiErrorCategory.DeviceLimitExceeded,
-                HttpStatusCode.Forbidden when status is "entitlement_denied" or "usage_denied" => ApiErrorCategory.EntitlementDenied,
+                HttpStatusCode.Forbidden when status is "entitlement_denied" or "usage_denied" or "usage_limit_exceeded" => ApiErrorCategory.EntitlementDenied,
                 HttpStatusCode.Forbidden when status is "account_not_found" or "account_suspended" => ApiErrorCategory.AccountNotUsable,
                 HttpStatusCode.Forbidden => ApiErrorCategory.ProviderAccessDenied,
                 HttpStatusCode.BadRequest => ApiErrorCategory.BadRequest,
@@ -192,20 +192,20 @@ public sealed class AutraxisApiClient : IAutraxisApiClient
                 _ => ApiErrorCategory.Unknown,
             };
 
-            throw new AutraxisApiException(category, status);
+            throw new AutraxisApiException(category, status, inner: null, backendCode: code);
         }
     }
 
-    private static async Task<string?> TryReadStatusAsync(HttpResponseMessage response, CancellationToken ct)
+    private static async Task<(string? Status, string? Code)> TryReadProblemAsync(HttpResponseMessage response, CancellationToken ct)
     {
         try
         {
             var problem = await response.Content.ReadFromJsonAsync<ProblemDto>(JsonOptions, ct);
-            return problem?.Status;
+            return (problem?.Status, problem?.Code);
         }
         catch (JsonException)
         {
-            return null; // malformed/non-JSON body — never crash the caller over a diagnostic detail
+            return (null, null); // malformed/non-JSON body — never crash the caller over a diagnostic detail
         }
     }
 }

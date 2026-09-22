@@ -26,7 +26,7 @@ public enum SessionStartOutcome
     UsageDenied,
 }
 
-public sealed record SessionStartResult(SessionStartOutcome Outcome, TranslationSession? Session, string Reason);
+public sealed record SessionStartResult(SessionStartOutcome Outcome, TranslationSession? Session, string Reason, string? Code = null);
 
 public enum SessionOperationOutcome
 {

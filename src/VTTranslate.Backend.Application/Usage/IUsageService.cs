@@ -34,6 +34,15 @@ public interface IUsageService
     /// <summary>Sums SERVER-DERIVED usage only for the given account/period — this is what <see cref="Entitlements.EntitlementService"/> calls; a client-reported hint never affects this figure.</summary>
     Task<double> GetAuthoritativeUsageSecondsAsync(Guid accountId, string periodBucket, CancellationToken ct);
 
+    /// <summary>
+    /// Phase 25B: sums SERVER-DERIVED usage recorded at or after <paramref name="since"/> across every UTC month bucket from
+    /// <paramref name="since"/> through now — i.e. a lifetime total that never resets at a calendar-month boundary. Used only for the
+    /// Trial allowance (the trial period start is the persisted <c>Subscription.CurrentPeriodStart</c>). Existing per-month
+    /// semantics (<see cref="GetAuthoritativeUsageSecondsAsync"/>) are untouched. <c>UsageRecord</c> carries no SubscriptionId, so records
+    /// are attributed to the trial by their persisted <c>RecordedAt</c> timestamp.
+    /// </summary>
+    Task<double> GetAuthoritativeUsageSecondsSinceAsync(Guid accountId, DateTimeOffset since, CancellationToken ct);
+
     /// <summary>Display-only summary (Phase 6.1 §9's <c>/usage/summary</c>) — includes both sources for transparency, but callers must not mistake this for the enforcement figure (use <see cref="GetAuthoritativeUsageSecondsAsync"/> for that).</summary>
     Task<UsageSummary> GetSummaryAsync(Guid accountId, string periodBucket, CancellationToken ct);
 }
